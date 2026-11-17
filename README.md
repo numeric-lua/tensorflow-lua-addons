@@ -45,6 +45,7 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 - `dice`
 - `tversky`
 - `triplet`
+- `contrastive`
 
 ### Metrics
 

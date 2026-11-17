@@ -100,6 +100,36 @@ function Losses.tversky(graph, labels, predictions, options)
     name .. "/loss", dtype)
 end
 
+function Losses.contrastive(graph, labels, left, right, options)
+  options = options or {}
+  local name = options.name or "contrastive_loss"
+  local dtype = options.dtype or "float32"
+  local margin = options.margin or 1
+  labels = tf.cast(graph, labels, labels.dtype or "float32", dtype,
+    name .. "/labels")
+  local delta = tf.sub(graph, left, right, name .. "/delta", dtype)
+  local squared = tf.square(graph, delta, name .. "/squared", dtype)
+  local distances = tf.reduce_sum(graph, squared, { 1 }, name .. "/squared_distance",
+    dtype)
+  local distance = tf.sqrt(graph, distances, name .. "/distance", dtype)
+  local half = tf.constant(graph, 0.5, name .. "/half", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local margin_op = tf.constant(graph, margin, name .. "/margin", dtype)
+  local positive = tf.mul(graph, half, tf.mul(graph, labels,
+    tf.square(graph, distance, name .. "/positive_square", dtype),
+    name .. "/positive_weighted", dtype), name .. "/positive", dtype)
+  local negative_distance = Ops.maximum(graph, tf.sub(graph, margin_op,
+    distance, name .. "/margin_minus_distance", dtype),
+    tf.constant(graph, 0, name .. "/zero", dtype), name .. "/negative_distance",
+    dtype)
+  local negative = tf.mul(graph, half, tf.mul(graph,
+    tf.sub(graph, one, labels, name .. "/one_minus_labels", dtype),
+    tf.square(graph, negative_distance, name .. "/negative_square", dtype),
+    name .. "/negative_weighted", dtype), name .. "/negative", dtype)
+  return tf.reduce_mean(graph, tf.add(graph, positive, negative,
+    name .. "/loss_values", dtype), { 0 }, name .. "/loss", dtype)
+end
+
 function Losses.triplet(graph, anchor, positive, negative, options)
   options = options or {}
   local name = options.name or "triplet_loss"

@@ -294,6 +294,23 @@ test("weight normalization has unit column norms", function()
   session:close()
 end)
 
+
+test("contrastive loss grows with labeled distances", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 2 }, "labels")
+  local left = tf.placeholder(graph, "float32", { 2, 2 }, "left")
+  local right = tf.placeholder(graph, "float32", { 2, 2 }, "right")
+  local loss = tfa.losses.contrastive(graph, labels, left, right,
+    { margin = 1 })
+  local session = tf.Session.new(graph)
+  local close = session:run({ [labels] = { 1, 0 }, [left] = { { 0, 0 }, { 0, 0 } },
+    [right] = { { 0, 0 }, { 2, 0 } } }, { loss })[1]:totable()
+  local far = session:run({ [labels] = { 1, 0 }, [left] = { { 0, 0 }, { 0, 0 } },
+    [right] = { { 2, 0 }, { 2, 0 } } }, { loss })[1]:totable()
+  assert_true(far > close, "contrastive loss should increase")
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then

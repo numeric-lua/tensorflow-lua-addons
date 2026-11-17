@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- contrastive loss.
+
 ## 0.3.0
 
 - triplet loss;
