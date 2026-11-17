@@ -144,4 +144,71 @@ function Optimizers.LAMB(graph, loss, variables, options)
   }
 end
 
+function Optimizers.NovoGrad(graph, loss, variables, options)
+  options = options or {}
+  local learning_rate = options.learning_rate or options.lr or 0.001
+  local beta1 = options.beta1 or 0.9
+  local beta2 = options.beta2 or 0.999
+  local epsilon = options.epsilon or 1e-8
+  local weight_decay = options.weight_decay or options.weight_decay_rate or 0
+  local name = options.name or "NovoGrad"
+  local refs = {}
+  for index, variable in ipairs(variables) do
+    refs[index] = variable.ref or variable
+  end
+  local gradients = tf.gradients(graph, { loss }, refs)
+  local dtype = variables[1].dtype or "float32"
+  local lr = tf.constant(graph, learning_rate, name .. "/learning_rate", dtype)
+  local b1 = tf.constant(graph, beta1, name .. "/beta1", dtype)
+  local b2 = tf.constant(graph, beta2, name .. "/beta2", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local eps = tf.constant(graph, epsilon, name .. "/epsilon", dtype)
+  local decay_op = tf.constant(graph, weight_decay, name .. "/weight_decay",
+    dtype)
+  local initializers, state_variables, targets = {}, {}, {}
+
+  for index, variable in ipairs(variables) do
+    local ref = variable.ref or variable
+    local var_dtype = variable.dtype or dtype
+    local shape = variable.shape or { }
+    local m = Train.variable(graph, zeros(shape), name .. "/m_" .. index,
+      { dtype = var_dtype })
+    local v = Train.variable(graph, zeros(shape), name .. "/v_" .. index,
+      { dtype = var_dtype })
+    initializers[#initializers + 1] = m.initializer
+    initializers[#initializers + 1] = v.initializer
+    state_variables[#state_variables + 1] = m
+    state_variables[#state_variables + 1] = v
+    local gradient = gradients[index]
+    local v_next = tf.add(graph, tf.mul(graph, v.read, b2,
+      name .. "/v_decay_" .. index, var_dtype), tf.mul(graph,
+      tf.square(graph, gradient, name .. "/grad_square_" .. index, var_dtype),
+      tf.sub(graph, one, b2, name .. "/one_minus_b2_" .. index, var_dtype),
+      name .. "/v_gradient_" .. index, var_dtype), name .. "/v_next_" ..
+      index, var_dtype)
+    local v_denom = tf.add(graph, tf.sqrt(graph, v_next,
+      name .. "/v_sqrt_" .. index, var_dtype), eps,
+      name .. "/v_epsilon_" .. index, var_dtype)
+    local normalized_gradient = tf.div(graph, tf.mul(graph, lr, gradient,
+      name .. "/lr_gradient_" .. index, var_dtype), v_denom,
+      name .. "/normalized_gradient_" .. index, var_dtype)
+    local m_next = tf.add(graph, tf.mul(graph, m.read, b1,
+      name .. "/m_decay_" .. index, var_dtype), normalized_gradient,
+      name .. "/m_next_" .. index, var_dtype)
+    local decay = tf.mul(graph, variable.read, decay_op,
+      name .. "/weight_decay_" .. index, var_dtype)
+    local next_weight = tf.sub(graph, variable.read, tf.add(graph, m_next,
+      decay, name .. "/update_and_decay_" .. index, var_dtype),
+      name .. "/next_weight_" .. index, var_dtype)
+    local v_assign = assign(graph, v.ref, v_next,
+      name .. "/v_assign_" .. index, var_dtype)
+    local m_assign = assign(graph, m.ref, m_next,
+      name .. "/m_assign_" .. index, var_dtype, { v_assign })
+    targets[#targets + 1] = assign(graph, ref, next_weight,
+      name .. "/weight_assign_" .. index, var_dtype, { m_assign })
+  end
+  return targets, gradients, { initializers = initializers,
+    variables = state_variables }
+end
+
 return Optimizers

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Cohen's kappa metric;
+- NovoGrad optimizer;
+- CSVLogger callback.
+
 ## 0.1.0
 
 - gelu, swish, mish, lisht, and tanhshrink activations;

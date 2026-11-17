@@ -100,6 +100,36 @@ function Metrics.r_square(graph, predictions, labels, options)
     name, "float32")
 end
 
+function Metrics.cohen_kappa(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "cohen_kappa"
+  local tp, fp, fn, tn = binary_counts(graph, predictions, labels,
+    options.threshold or 0.5, name)
+  local total = tf.add(graph, tf.add(graph, tp, fp, name .. "/total_pos",
+    "float32"), tf.add(graph, fn, tn, name .. "/total_neg", "float32"),
+    name .. "/total", "float32")
+  local observed = Ops.clean_div(graph, tf.add(graph, tp, tn,
+    name .. "/observed_correct", "float32"), total, name .. "/observed",
+    "float32")
+  local expected_positive = tf.mul(graph, tf.add(graph, tp, fp,
+    name .. "/predicted_positive", "float32"), tf.add(graph, tp, fn,
+    name .. "/actual_positive", "float32"), name .. "/expected_positive",
+    "float32")
+  local expected_negative = tf.mul(graph, tf.add(graph, tn, fp,
+    name .. "/predicted_negative", "float32"), tf.add(graph, tn, fn,
+    name .. "/actual_negative", "float32"), name .. "/expected_negative",
+    "float32")
+  local expected_total = tf.mul(graph, total, total, name .. "/total_square",
+    "float32")
+  local expected = Ops.clean_div(graph, tf.add(graph, expected_positive,
+    expected_negative, name .. "/expected_sum", "float32"), expected_total,
+    name .. "/expected", "float32")
+  local one = tf.constant(graph, 1, name .. "/one_kappa", "float32")
+  return Ops.clean_div(graph, tf.sub(graph, observed, expected,
+    name .. "/difference", "float32"), tf.sub(graph, one, expected,
+    name .. "/one_minus_expected", "float32"), name, "float32")
+end
+
 function Metrics.pearson_correlation(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "pearson_correlation"

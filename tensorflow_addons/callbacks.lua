@@ -37,6 +37,37 @@ function Callbacks.TerminateOnNaN()
   return callback
 end
 
+function Callbacks.CSVLogger(path, options)
+  options = options or {}
+  if type(path) ~= "string" or path == "" then
+    error("CSVLogger requires a path", 2)
+  end
+  local callback = { path = path, header = nil, options = options }
+  function callback.on_train_begin(history)
+    local keys = {}
+    for key in pairs(history or {}) do
+      if type(history[key]) == "table" then keys[#keys + 1] = key end
+    end
+    table.sort(keys)
+    callback.header = keys
+    local file = assert(io.open(path, "w"))
+    file:write(table.concat(keys, ",") .. "\n")
+    file:close()
+  end
+  function callback.on_epoch_end(history)
+    if callback.header == nil then callback.on_train_begin(history) end
+    local values = {}
+    for index, key in ipairs(callback.header) do
+      local entries = history[key] or {}
+      values[index] = tostring(entries[#entries])
+    end
+    local file = assert(io.open(path, "a"))
+    file:write(table.concat(values, ",") .. "\n")
+    file:close()
+  end
+  return callback
+end
+
 function Callbacks.BackupAndRestore(path, options)
   if type(path) ~= "string" or path == "" then
     error("BackupAndRestore requires a path", 2)

@@ -210,6 +210,56 @@ test("LAMB updates variables and optimizer state", function()
   session:close()
 end)
 
+
+test("Cohen's kappa is one for perfect predictions", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 4 }, "labels")
+  local predictions = tf.placeholder(graph, "float32", { 4 }, "predictions")
+  local metric = tfa.metrics.cohen_kappa(graph, predictions, labels)
+  local value = run(graph, { [labels] = { 1, 0, 1, 0 },
+    [predictions] = { 1, 0, 1, 0 } }, metric)
+  near(value, 1, 1e-6, "kappa")
+end)
+
+test("CSVLogger writes a header and epochs", function()
+  local path = "/tmp/tfa-csv-logger.csv"
+  os.remove(path)
+  local callback = tfa.callbacks.CSVLogger(path)
+  callback.on_train_begin({ loss = {} })
+  callback.on_epoch_end({ loss = { 1.5 } })
+  callback.on_epoch_end({ loss = { 0.5 } })
+  local file = assert(io.open(path, "r"))
+  local content = file:read("*a")
+  file:close()
+  os.remove(path)
+  assert_true(content:find("loss", 1, true) ~= nil)
+  assert_true(content:find("1.5", 1, true) ~= nil)
+  assert_true(content:find("0.5", 1, true) ~= nil)
+end)
+
+test("NovoGrad updates variables and optimizer state", function()
+  math.randomseed(47)
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 1 }, "ng_input")
+  local target = tf.placeholder(graph, "float32", { 2, 1 }, "ng_target")
+  local weight = require("tensorflow.train").variable(graph, { { 0.5 } },
+    "ng_weight", { dtype = "float32" })
+  local output = tf.matmul(graph, input, weight.read, "ng_output",
+    "float32")
+  local loss = tf.losses.mean_squared_error(graph, output, target,
+    { axes = { 0, 1 } })
+  local targets, _, state = tfa.optimizers.NovoGrad(graph, loss, { weight },
+    { learning_rate = 0.01 })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({ [input] = { { 1 }, { 2 } }, [target] = { { 1 }, { 2 } } }, {},
+    targets)
+  local value = session:run({}, { weight.read })[1]:totable()[1][1]
+  assert_true(value == value, "NovoGrad produced NaN")
+  assert_true(value ~= 0.5, "NovoGrad did not update the weight")
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then

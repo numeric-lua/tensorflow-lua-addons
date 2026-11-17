@@ -50,6 +50,7 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 - `f1_score`
 - `fbeta_score`
 - `matthews_corrcoef`
+- `cohen_kappa`
 - `r_square`
 - `pearson_correlation`
 
@@ -62,12 +63,14 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 ### Optimizers
 
 - `LAMB`
+- `NovoGrad`
 
 ### Callbacks
 
 - `TimeStopping`
 - `TerminateOnNaN`
 - `BackupAndRestore`
+- `CSVLogger`
 
 ## Parity roadmap
 
@@ -76,7 +79,7 @@ Still to port from TensorFlow Addons:
 - spectral/weight normalization and Poisson/quantization layers;
 - triplet/contrastive/GIoU and other specialized losses;
 - Cohen kappa and multi-class metric coverage;
-- LazyAdam, NovoGrad, Lookahead, and weight-decay optimizer wrappers;
+- LazyAdam, Lookahead, and weight-decay optimizer wrappers;
 - RNN/text/seq2seq addons;
 - image augmentations and preprocessing;
 - TQDM and CSV logging callbacks.
