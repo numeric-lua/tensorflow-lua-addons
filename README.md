@@ -26,6 +26,7 @@ local tfa = require("tensorflow_addons")
 
 local activation = tfa.activations.gelu(graph, input, "gelu")
 local loss = tfa.losses.focal(graph, labels, predictions, { gamma = 2 })
+local box_loss = tfa.losses.giou(graph, boxes, predicted_boxes)
 local metric = tfa.metrics.f1_score(graph, predictions, labels)
 local layer = tfa.layers.group_normalization(graph, input, 4,
   { input_shape = { 8, 8, 16 } })
@@ -46,6 +47,16 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 - `tversky`
 - `triplet`
 - `contrastive`
+- `giou`
+
+`giou` accepts boxes shaped `[..., 4]` in `[x1, y1, x2, y2]` order. It pairs
+the leading dimensions one-vs-one and returns the mean `1 - GIoU` loss. Use
+`options.name`, `options.dtype`, and `options.epsilon` (default `1e-7`) to
+configure the graph namespace, numeric type, and zero-area denominator guard.
+`tfa.losses.giou_loss` is provided as a TensorFlow Addons-style alias.
+
+Loss roadmap: `focal`, `dice`, `tversky`, `triplet`, `contrastive`, and `giou`
+are available; further specialized losses remain on the parity roadmap.
 
 ### Metrics
 
@@ -81,7 +92,7 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 Still to port from TensorFlow Addons:
 
 - Poisson/quantization layers;
-- triplet/contrastive/GIoU and other specialized losses;
+- further specialized losses beyond the implemented set;
 - Cohen kappa and multi-class metric coverage;
 - LazyAdam, Lookahead, and weight-decay optimizer wrappers;
 - RNN/text/seq2seq addons;

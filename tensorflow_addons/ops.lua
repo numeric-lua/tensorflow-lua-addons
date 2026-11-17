@@ -37,6 +37,25 @@ function Ops.flatten(graph, input, name, dtype)
   return tf.reshape(graph, input, { -1 }, name, dtype)
 end
 
+function Ops.split(graph, input, num, axis, name, dtype)
+  if type(num) ~= "number" or num < 1 then
+    error("split expects a positive output count", 3)
+  end
+  local axis_op = tf.constant(graph, axis or 0, name .. "/axis", "int32")
+  local desc = graph:new_operation("Split", name)
+  desc:add_input(axis_op)
+  desc:add_input(input)
+  desc:set_type("T", dtype or "float32")
+  desc:set_int("num_split", num)
+  local first = desc:finish()
+  local outputs = {}
+  for index = 0, num - 1 do
+    outputs[index + 1] = { oper = first.oper, index = index,
+      name = name .. ":" .. index, dtype = dtype or "float32" }
+  end
+  return outputs
+end
+
 function Ops.sum_all(graph, input, name, dtype)
   return tf.reduce_sum(graph, Ops.flatten(graph, input, name .. "/flat",
     dtype), { 0 }, name, dtype)

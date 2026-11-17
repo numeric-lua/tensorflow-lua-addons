@@ -100,6 +100,83 @@ function Losses.tversky(graph, labels, predictions, options)
     name .. "/loss", dtype)
 end
 
+function Losses.giou(graph, labels, predictions, options)
+  options = options or {}
+  local name = options.name or "giou_loss"
+  local dtype = options.dtype or "float32"
+  local epsilon = options.epsilon or options.eps or 1e-7
+  labels = tf.cast(graph, labels, labels.dtype or "float32", dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or "float32",
+    dtype, name .. "/predictions")
+  local true_boxes = Ops.split(graph, labels, 4, -1, name .. "/true_boxes",
+    dtype)
+  local pred_boxes = Ops.split(graph, predictions, 4, -1, name .. "/pred_boxes",
+    dtype)
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local function ordered(boxes, prefix)
+    local x1 = Ops.minimum(graph, boxes[1], boxes[3], prefix .. "/x1", dtype)
+    local y1 = Ops.minimum(graph, boxes[2], boxes[4], prefix .. "/y1", dtype)
+    local x2 = Ops.maximum(graph, boxes[1], boxes[3], prefix .. "/x2", dtype)
+    local y2 = Ops.maximum(graph, boxes[2], boxes[4], prefix .. "/y2", dtype)
+    return x1, y1, x2, y2
+  end
+  local tx1, ty1, tx2, ty2 = ordered(true_boxes, name .. "/true")
+  local px1, py1, px2, py2 = ordered(pred_boxes, name .. "/pred")
+  local true_width = tf.sub(graph, tx2, tx1, name .. "/true_width", dtype)
+  local true_height = tf.sub(graph, ty2, ty1, name .. "/true_height", dtype)
+  local pred_width = tf.sub(graph, px2, px1, name .. "/pred_width", dtype)
+  local pred_height = tf.sub(graph, py2, py1, name .. "/pred_height", dtype)
+  local true_area = tf.mul(graph, true_width, true_height,
+    name .. "/true_area", dtype)
+  local pred_area = tf.mul(graph, pred_width, pred_height,
+    name .. "/pred_area", dtype)
+  local intersect_x1 = Ops.maximum(graph, tx1, px1,
+    name .. "/intersect_x1", dtype)
+  local intersect_y1 = Ops.maximum(graph, ty1, py1,
+    name .. "/intersect_y1", dtype)
+  local intersect_x2 = Ops.minimum(graph, tx2, px2,
+    name .. "/intersect_x2", dtype)
+  local intersect_y2 = Ops.minimum(graph, ty2, py2,
+    name .. "/intersect_y2", dtype)
+  local intersect_width = Ops.maximum(graph, tf.sub(graph, intersect_x2,
+    intersect_x1, name .. "/intersect_width_raw", dtype), zero,
+    name .. "/intersect_width", dtype)
+  local intersect_height = Ops.maximum(graph, tf.sub(graph, intersect_y2,
+    intersect_y1, name .. "/intersect_height_raw", dtype), zero,
+    name .. "/intersect_height", dtype)
+  local intersection = tf.mul(graph, intersect_width, intersect_height,
+    name .. "/intersection", dtype)
+  local union = tf.sub(graph, tf.add(graph, true_area, pred_area,
+    name .. "/area_sum", dtype), intersection, name .. "/union", dtype)
+  local enclose_x1 = Ops.minimum(graph, tx1, px1,
+    name .. "/enclose_x1", dtype)
+  local enclose_y1 = Ops.minimum(graph, ty1, py1,
+    name .. "/enclose_y1", dtype)
+  local enclose_x2 = Ops.maximum(graph, tx2, px2,
+    name .. "/enclose_x2", dtype)
+  local enclose_y2 = Ops.maximum(graph, ty2, py2,
+    name .. "/enclose_y2", dtype)
+  local enclose_width = tf.sub(graph, enclose_x2, enclose_x1,
+    name .. "/enclose_width", dtype)
+  local enclose_height = tf.sub(graph, enclose_y2, enclose_y1,
+    name .. "/enclose_height", dtype)
+  local enclose_area = tf.mul(graph, enclose_width, enclose_height,
+    name .. "/enclose_area", dtype)
+  local iou = Ops.clean_div(graph, intersection, union, name .. "/iou", dtype,
+    epsilon)
+  local penalty = Ops.clean_div(graph, tf.sub(graph, enclose_area, union,
+    name .. "/penalty_raw", dtype), enclose_area, name .. "/penalty", dtype,
+    epsilon)
+  local giou = tf.sub(graph, iou, penalty, name .. "/giou", dtype)
+  local loss_values = tf.sub(graph, tf.constant(graph, 1, name .. "/one",
+    dtype), giou, name .. "/loss_values", dtype)
+  return tf.reduce_mean(graph, Ops.flatten(graph, loss_values,
+    name .. "/loss_flat", dtype), { 0 }, name .. "/loss", dtype)
+end
+
+Losses.giou_loss = Losses.giou
+
 function Losses.contrastive(graph, labels, left, right, options)
   options = options or {}
   local name = options.name or "contrastive_loss"

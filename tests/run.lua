@@ -314,6 +314,58 @@ test("contrastive loss grows with labeled distances", function()
   session:close()
 end)
 
+test("giou loss matches analytic values for paired boxes", function()
+  local cases = {
+    { key = "identical", truth = { 0, 0, 2, 2 },
+      predicted = { 0, 0, 2, 2 }, expected = 0 },
+    { key = "disjoint", truth = { 0, 0, 2, 2 },
+      predicted = { 3, 0, 5, 2 }, expected = 6 / 5 },
+    { key = "partial", truth = { 0, 0, 2, 2 },
+      predicted = { 1, 1, 3, 3 }, expected = 68 / 63 },
+    { key = "nested", truth = { 0, 0, 4, 4 },
+      predicted = { 1, 1, 3, 3 }, expected = 3 / 4 },
+  }
+  for _, case in ipairs(cases) do
+    local graph = tf.Graph.new()
+    local labels = tf.placeholder(graph, "float32", { 1, 4 },
+      case.key .. "_labels")
+    local predictions = tf.placeholder(graph, "float32", { 1, 4 },
+      case.key .. "_predictions")
+    local loss = tfa.losses.giou(graph, labels, predictions)
+    local value = run(graph, { [labels] = { case.truth },
+      [predictions] = { case.predicted } }, loss)
+    near(value, case.expected, 1e-6, "giou " .. case.key)
+  end
+end)
+
+test("giou loss averages one-vs-one batch pairs", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 2, 4 }, "giou_batch_labels")
+  local predictions = tf.placeholder(graph, "float32", { 2, 4 },
+    "giou_batch_predictions")
+  local loss = tfa.losses.giou(graph, labels, predictions)
+  local value = run(graph, {
+    [labels] = { { 0, 0, 2, 2 }, { 0, 0, 4, 4 } },
+    [predictions] = { { 0, 0, 2, 2 }, { 1, 1, 3, 3 } },
+  }, loss)
+  near(value, 3 / 8, 1e-6, "giou batch mean")
+end)
+
+test("giou loss is finite for degenerate boxes", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 2, 4 },
+    "giou_degenerate_labels")
+  local predictions = tf.placeholder(graph, "float32", { 2, 4 },
+    "giou_degenerate_predictions")
+  local loss = tfa.losses.giou(graph, labels, predictions)
+  local value = run(graph, {
+    [labels] = { { 0, 0, 0, 0 }, { 1, 1, 1, 1 } },
+    [predictions] = { { 0, 0, 0, 0 }, { 2, 2, 2, 2 } },
+  }, loss)
+  assert_true(value == value, "giou degenerate boxes produced NaN")
+  assert_true(value >= 0, "giou degenerate boxes produced a negative loss")
+end)
+
 test("spectral normalization has a finite norm and updates state", function()
   local graph = tf.Graph.new()
   local weight = tf.variable(graph, { { 2, 0 }, { 0, 1 } }, "spectral_weight",

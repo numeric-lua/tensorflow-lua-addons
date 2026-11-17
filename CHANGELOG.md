@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- GIoU loss for batched one-vs-one bounding boxes.
+
 ## 0.5.0
 
 - spectral normalization with persistent power-iteration state.
