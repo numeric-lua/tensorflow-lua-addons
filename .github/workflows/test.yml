@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: numeric-lua/tensorflow-lua
+          path: tensorflow-lua
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends luajit curl
+      - name: Fetch libtensorflow
+        working-directory: tensorflow-lua
+        run: ./scripts/fetch_libtensorflow.sh
+      - name: Run addons tests
+        run: TENSORFLOW_ROOT="$PWD/tensorflow-lua/third_party/libtensorflow" ./scripts/test.sh
+      - name: Lint
+        run: ./scripts/lint.sh
