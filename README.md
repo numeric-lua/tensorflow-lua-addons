@@ -1,5 +1,7 @@
 # tensorflow-lua-addons
 
+[![❤ Sponsor on GitHub](https://img.shields.io/badge/%E2%9D%A4%20Sponsor-GitHub-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Mateus-M-Reis)
+
 Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
@@ -82,11 +84,16 @@ Still to port from TensorFlow Addons:
 ## Tests
 
 ```sh
-TENSORFLOW_ROOT="$PWD/third_party/libtensorflow" ./scripts/test.sh
+TENSORFLOW_ROOT="../tensorflow-lua/third_party/libtensorflow" ./scripts/test.sh
 ```
 
 The suite is dependency-free and uses a sibling `tensorflow-lua` checkout by
 default.
+
+## Support
+
+Support is optional and never unlocks features. See the organization support
+page: <https://github.com/numeric-lua/.github/blob/main/SUPPORT.md>.
 
 ## License
 
