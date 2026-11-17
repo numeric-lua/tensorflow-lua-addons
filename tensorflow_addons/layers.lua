@@ -82,7 +82,8 @@ function Layers.instance_normalization(graph, input, options)
     error("instance_normalization requires options.input_shape", 3)
   end
   local channels = shape[#shape]
-  return Layers.group_normalization(graph, input, channels,
+
+return Layers.group_normalization(graph, input, channels,
     { input_shape = shape, epsilon = options.epsilon,
       dtype = options.dtype, name = options.name or "instance_normalization" })
 end
@@ -142,6 +143,88 @@ function Layers.weight_normalization(graph, shape, options)
     output = output, v = v, g = g, variables = { v, g },
     initializers = { v.initializer, g.initializer }, shape = shape,
   }
+end
+
+
+local function matmul(graph, a, b, transpose_a, transpose_b, name, dtype)
+local desc = graph:new_operation("MatMul", name)
+desc:add_input(a)
+desc:add_input(b)
+desc:set_type("T", dtype)
+desc:set_bool("transpose_a", transpose_a == true)
+desc:set_bool("transpose_b", transpose_b == true)
+return desc:finish()
+end
+
+local function assign(graph, ref, value, name, dtype)
+local desc = graph:new_operation("Assign", name)
+desc:add_input(ref)
+desc:add_input(value)
+desc:set_type("T", dtype)
+desc:set_bool("use_locking", true)
+return desc:finish()
+end
+
+local function l2_normalize(graph, value, name, dtype, epsilon)
+local squared = tf.square(graph, value, name .. "/squared", dtype)
+local total = tf.reduce_sum(graph, squared, { 0, 1 }, name .. "/sum", dtype)
+local norm = tf.sqrt(graph, tf.add(graph, total,
+  tf.constant(graph, epsilon or 1e-12, name .. "/epsilon", dtype),
+  name .. "/norm_base", dtype), name .. "/norm", dtype)
+return tf.div(graph, value, norm, name .. "/normalized", dtype)
+end
+
+function Layers.spectral_normalization(graph, weight, options)
+options = options or {}
+local shape = options.weight_shape
+if type(shape) ~= "table" or #shape ~= 2 then
+  error("spectral_normalization requires options.weight_shape = {m, n}", 3)
+end
+local m, n = shape[1], shape[2]
+local dtype = options.dtype or "float32"
+local prefix = options.name or "spectral_normalization"
+local iterations = options.iterations or 1
+if type(iterations) ~= "number" or iterations < 0 then
+  error("spectral_normalization iterations must be non-negative", 3)
+end
+local function initial_vector(count)
+  local value = 1 / math.sqrt(count)
+  local result = {}
+  for index = 1, count do result[index] = { value } end
+  return result
+end
+local u = tf.variable(graph, initial_vector(m), prefix .. "/u",
+  { dtype = dtype })
+local v = tf.variable(graph, initial_vector(n), prefix .. "/v",
+  { dtype = dtype })
+local u_value, v_value = u.read, v.read
+for iteration = 1, iterations do
+  local wt_u = matmul(graph, weight, u_value, true, false,
+    prefix .. "/wt_u_" .. iteration, dtype)
+  v_value = l2_normalize(graph, wt_u, prefix .. "/v_" .. iteration, dtype,
+    options.epsilon)
+  local w_v = matmul(graph, weight, v_value, false, false,
+    prefix .. "/w_v_" .. iteration, dtype)
+  u_value = l2_normalize(graph, w_v, prefix .. "/u_" .. iteration, dtype,
+    options.epsilon)
+end
+local wv = matmul(graph, weight, v_value, false, false,
+  prefix .. "/final_wv", dtype)
+local sigma = tf.reduce_sum(graph, tf.mul(graph, u_value, wv,
+  prefix .. "/sigma_tensor", dtype), { 0, 1 }, prefix .. "/sigma", dtype)
+local safe_sigma = Ops.maximum(graph, sigma,
+  tf.constant(graph, options.epsilon or 1e-12, prefix .. "/sigma_epsilon",
+    dtype), prefix .. "/safe_sigma", dtype)
+local output = tf.div(graph, weight, safe_sigma, prefix .. "/weight", dtype)
+local updates = {
+  assign(graph, u.ref, u_value, prefix .. "/update_u", dtype),
+  assign(graph, v.ref, v_value, prefix .. "/update_v", dtype),
+}
+return {
+  output = output, u = u, v = v, variables = { u, v },
+  initializers = { u.initializer, v.initializer }, updates = updates,
+  sigma = sigma, weight_shape = shape,
+}
 end
 
 return Layers

@@ -62,6 +62,7 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 - `instance_normalization`
 - `layer_normalization`
 - `weight_normalization`
+- `spectral_normalization`
 
 ### Optimizers
 
@@ -79,7 +80,7 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 
 Still to port from TensorFlow Addons:
 
-- spectral/weight normalization and Poisson/quantization layers;
+- Poisson/quantization layers;
 - triplet/contrastive/GIoU and other specialized losses;
 - Cohen kappa and multi-class metric coverage;
 - LazyAdam, Lookahead, and weight-decay optimizer wrappers;

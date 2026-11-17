@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0
+
+- spectral normalization with persistent power-iteration state.
+
 ## 0.4.0
 
 - contrastive loss.

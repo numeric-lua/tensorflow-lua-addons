@@ -314,6 +314,28 @@ test("contrastive loss grows with labeled distances", function()
   session:close()
 end)
 
+test("spectral normalization has a finite norm and updates state", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 2, 0 }, { 0, 1 } }, "spectral_weight",
+    { dtype = "float32" })
+  local layer = tfa.layers.spectral_normalization(graph, weight.read,
+    { weight_shape = { 2, 2 }, iterations = 3, name = "spectral" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(layer.initializers) })
+  local values = session:run({}, { layer.output })[1]:totable()
+  local largest = 0
+  for row = 1, 2 do
+    for column = 1, 2 do
+      largest = math.max(largest, math.abs(values[row][column]))
+    end
+  end
+  assert_true(largest <= 1.01, "spectral weight should have norm <= 1")
+  session:run({}, {}, layer.updates)
+  local u = session:run({}, { layer.u.read })[1]:totable()
+  assert_true(u[1][1] == u[1][1], "u must remain finite")
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then
