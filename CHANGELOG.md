@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- triplet loss;
+- weight-normalization helper.
+
 ## 0.2.0
 
 - Cohen's kappa metric;

@@ -100,4 +100,32 @@ function Losses.tversky(graph, labels, predictions, options)
     name .. "/loss", dtype)
 end
 
+function Losses.triplet(graph, anchor, positive, negative, options)
+  options = options or {}
+  local name = options.name or "triplet_loss"
+  local dtype = options.dtype or "float32"
+  local margin = options.margin or 1
+  local anchor_flat = Ops.flatten(graph, anchor, name .. "/anchor_flat", dtype)
+  local positive_flat = Ops.flatten(graph, positive, name .. "/positive_flat",
+    dtype)
+  local negative_flat = Ops.flatten(graph, negative, name .. "/negative_flat",
+    dtype)
+  local positive_delta = tf.sub(graph, anchor_flat, positive_flat,
+    name .. "/positive_delta", dtype)
+  local negative_delta = tf.sub(graph, anchor_flat, negative_flat,
+    name .. "/negative_delta", dtype)
+  local positive_distance = tf.sqrt(graph, Ops.sum_all(graph,
+    tf.square(graph, positive_delta, name .. "/positive_square", dtype),
+    name .. "/positive_distance", dtype), name .. "/positive_norm", dtype)
+  local negative_distance = tf.sqrt(graph, Ops.sum_all(graph,
+    tf.square(graph, negative_delta, name .. "/negative_square", dtype),
+    name .. "/negative_distance", dtype), name .. "/negative_norm", dtype)
+  local difference = tf.add(graph, tf.sub(graph, positive_distance,
+    negative_distance, name .. "/distance_difference", dtype),
+    tf.constant(graph, margin, name .. "/margin", dtype),
+    name .. "/margin_difference", dtype)
+  return Ops.maximum(graph, difference, tf.constant(graph, 0,
+    name .. "/zero", dtype), name .. "/loss", dtype)
+end
+
 return Losses

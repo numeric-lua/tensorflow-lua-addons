@@ -105,4 +105,43 @@ function Layers.layer_normalization(graph, input, options)
   }
 end
 
+function Layers.weight_normalization(graph, shape, options)
+  options = options or {}
+  if type(shape) ~= "table" or #shape < 1 then
+    error("weight_normalization requires a weight shape", 3)
+  end
+  local dtype = options.dtype or "float32"
+  local prefix = options.name or "weight_normalization"
+  local bound = math.sqrt(6 / (shape[1] * (shape[#shape] or 1)))
+  local function random_tensor(dimension)
+    if dimension > #shape then return (math.random() * 2 - 1) * bound end
+    local result = {}
+    for index = 1, shape[dimension] do
+      result[index] = random_tensor(dimension + 1)
+    end
+    return result
+  end
+  local v = tf.variable(graph, random_tensor(1), prefix .. "/v",
+    { dtype = dtype })
+  local g_values = {}
+  for index = 1, shape[#shape] do g_values[index] = 1 end
+  local g = tf.variable(graph, g_values, prefix .. "/g", { dtype = dtype })
+  local flat = tf.reshape(graph, v.read, { -1, shape[#shape] },
+    prefix .. "/flat", dtype)
+  local squared = tf.square(graph, flat, prefix .. "/squared", dtype)
+  local variance = tf.reduce_sum(graph, squared, { 0 }, prefix .. "/norm",
+    dtype, true)
+  local denominator = tf.sqrt(graph, tf.add(graph, variance,
+    tf.constant(graph, options.epsilon or 1e-12, prefix .. "/epsilon", dtype),
+    prefix .. "/denominator_base", dtype), prefix .. "/denominator", dtype)
+  local normalized = tf.div(graph, flat, denominator, prefix .. "/normalized",
+    dtype)
+  local scaled = tf.mul(graph, normalized, g.read, prefix .. "/scaled", dtype)
+  local output = tf.reshape(graph, scaled, shape, prefix .. "/weight", dtype)
+  return {
+    output = output, v = v, g = g, variables = { v, g },
+    initializers = { v.initializer, g.initializer }, shape = shape,
+  }
+end
+
 return Layers

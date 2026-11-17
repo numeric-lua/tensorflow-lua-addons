@@ -44,6 +44,7 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 - `focal`
 - `dice`
 - `tversky`
+- `triplet`
 
 ### Metrics
 
@@ -59,6 +60,7 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
 - `group_normalization`
 - `instance_normalization`
 - `layer_normalization`
+- `weight_normalization`
 
 ### Optimizers
 

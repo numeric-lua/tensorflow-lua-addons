@@ -260,6 +260,40 @@ test("NovoGrad updates variables and optimizer state", function()
   session:close()
 end)
 
+
+test("triplet loss uses the configured margin", function()
+  local graph = tf.Graph.new()
+  local anchor = tf.placeholder(graph, "float32", { 1 }, "anchor")
+  local positive = tf.placeholder(graph, "float32", { 1 }, "positive")
+  local negative = tf.placeholder(graph, "float32", { 1 }, "negative")
+  local loss = tfa.losses.triplet(graph, anchor, positive, negative,
+    { margin = 1 })
+  local session = tf.Session.new(graph)
+  local zero = session:run({ [anchor] = { 0 }, [positive] = { 0 },
+    [negative] = { 1 } }, { loss })[1]:totable()
+  local one = session:run({ [anchor] = { 0 }, [positive] = { 1 },
+    [negative] = { 1 } }, { loss })[1]:totable()
+  near(zero, 0, 1e-6, "triplet zero")
+  near(one, 1, 1e-6, "triplet margin")
+  session:close()
+end)
+
+test("weight normalization has unit column norms", function()
+  math.randomseed(49)
+  local graph = tf.Graph.new()
+  local layer = tfa.layers.weight_normalization(graph, { 3, 2 },
+    { name = "wn" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, layer.initializers)
+  local values = session:run({}, { layer.output })[1]:totable()
+  for column = 1, 2 do
+    local total = 0
+    for row = 1, 3 do total = total + values[row][column] ^ 2 end
+    near(total, 1, 1e-5, "column " .. column)
+  end
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then
