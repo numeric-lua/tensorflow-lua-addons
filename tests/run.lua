@@ -1,8 +1,11 @@
 local root = (arg and arg[0] or "tests/run.lua"):match("^(.*)tests/run.lua$")
   or "."
-local tf_root = root .. "/../tensorflow-lua"
-if not io.open(tf_root .. "/tensorflow/init.lua", "r") then
-  tf_root = root .. "/tensorflow-lua"
+local tf_root = os.getenv("TENSORFLOW_LUA_ROOT")
+if not tf_root or not io.open(tf_root .. "/tensorflow/init.lua", "r") then
+  tf_root = root .. "/../tensorflow-lua"
+  if not io.open(tf_root .. "/tensorflow/init.lua", "r") then
+    tf_root = root .. "/tensorflow-lua"
+  end
 end
 package.path = root .. "/?.lua;" .. root .. "/?/init.lua;" ..
   tf_root .. "/?.lua;" .. tf_root .. "/?/init.lua;" .. package.path

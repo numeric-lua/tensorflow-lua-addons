@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-if [ -f "$ROOT/tensorflow-lua/tensorflow/init.lua" ]; then
+if [ -n "${TENSORFLOW_LUA_ROOT:-}" ]; then
+  TF_SOURCE="$TENSORFLOW_LUA_ROOT"
+elif [ -f "$ROOT/tensorflow-lua/tensorflow/init.lua" ]; then
   TF_SOURCE="$ROOT/tensorflow-lua"
 else
   TF_SOURCE="$ROOT/../tensorflow-lua"
