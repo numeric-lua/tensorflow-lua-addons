@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- GIoU loss for batched one-vs-one bounding boxes.
+- GIoU loss for batched one-vs-one bounding boxes;
+- Lookahead optimizer wrapper with slow-weight synchronization.
 
 ## 0.5.0
 

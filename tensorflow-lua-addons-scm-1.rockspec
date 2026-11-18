@@ -8,8 +8,9 @@ source = {
 description = {
   summary = "TensorFlow Addons for LuaJIT",
   detailed = [[
-    Activations, losses, metrics, normalization layers, LAMB, and callbacks
-    built on tensorflow-lua. Requires a local libtensorflow installation.
+    Activations, losses, metrics, normalization layers, LAMB, NovoGrad,
+    Lookahead, and callbacks built on tensorflow-lua. Requires a local
+    libtensorflow installation.
   ]],
   homepage = "https://github.com/numeric-lua/tensorflow-lua-addons",
   license = "BSD-3-Clause",

@@ -264,6 +264,129 @@ test("NovoGrad updates variables and optimizer state", function()
 end)
 
 
+test("Lookahead rejects invalid sync periods", function()
+  for _, period in ipairs({ 0, -2, 1.5, "5" }) do
+    local ok, err = pcall(tfa.optimizers.Lookahead, tfa.optimizers.LAMB,
+      { sync_period = period })
+    assert_true(not ok, "Lookahead should reject period " .. tostring(period))
+    assert_true(tostring(err):find("sync_period", 1, true) ~= nil,
+      "invalid period error should mention sync_period")
+  end
+end)
+
+test("Lookahead leaves slow weights alone until the sync step", function()
+  local graph = tf.Graph.new()
+  local weight = require("tensorflow.train").variable(graph, { { 1.0 } },
+    "la_weight", { dtype = "float32" })
+  local function base(g, _, variables)
+    local variable = variables[1]
+    local delta = tf.constant(g, { { 0.1 } }, "la_base/delta", "float32")
+    local next_weight = tf.sub(g, variable.read, delta, "la_base/next",
+      "float32")
+    local desc = g:new_operation("Assign", "la_base/assign")
+    desc:add_input(variable.ref)
+    desc:add_input(next_weight)
+    desc:set_type("T", "float32")
+    desc:set_bool("use_locking", true)
+    return { desc:finish() }
+  end
+  local optimizer = tfa.optimizers.Lookahead(base,
+    { sync_period = 3, slow_step_size = 0.5 })
+  local targets, gradients, state = optimizer(graph, nil, { weight })
+  assert_eq(#gradients, 0)
+  local slow = state.slow_weights[1]
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  local function read(variable) return session:run({}, { variable.read })[1]
+    :totable()[1][1] end
+
+  local desc = graph:new_operation("Assign", "la_set_slow")
+  desc:add_input(slow.ref)
+  desc:add_input(tf.constant(graph, { { 10.0 } }, "la_set_slow/value",
+    "float32"))
+  desc:set_type("T", "float32")
+  desc:set_bool("use_locking", true)
+  session:run({}, {}, { desc:finish() })
+  assert_eq(read(slow), 10)
+
+  session:run({}, {}, targets)
+  near(read(weight), 0.9, 1e-6, "fast weight after first step")
+  assert_eq(read(slow), 10)
+  session:run({}, {}, targets)
+  near(read(weight), 0.8, 1e-6, "fast weight after second step")
+  assert_eq(read(slow), 10)
+
+  local before_sync = read(weight)
+  session:run({}, {}, targets)
+  local fast = read(weight)
+  local synced = read(slow)
+  near(fast, synced, 1e-6, "fast and slow weights after sync")
+  near(synced, 5.35, 1e-5, "blended slow weight")
+  assert_true(fast > before_sync, "fast weight should move toward slow")
+  assert_true(synced < 10, "slow weight should move toward fast")
+  near(session:run({}, { state.step.read })[1]:totable(), 3, 0, "step")
+  session:close()
+end)
+
+test("Lookahead defaults initialize slow weights from fast weights", function()
+  local graph = tf.Graph.new()
+  local weight = require("tensorflow.train").variable(graph, { { 3.0 } },
+    "la_default_weight", { dtype = "float32" })
+  local function base(g, _, variables)
+    local variable = variables[1]
+    local delta = tf.constant(g, { { 0.1 } }, "la_default/delta", "float32")
+    local next_weight = tf.sub(g, variable.read, delta, "la_default/next",
+      "float32")
+    local desc = g:new_operation("Assign", "la_default/assign")
+    desc:add_input(variable.ref)
+    desc:add_input(next_weight)
+    desc:set_type("T", "float32")
+    desc:set_bool("use_locking", true)
+    return { desc:finish() }
+  end
+  local optimizer = tfa.optimizers.Lookahead(base)
+  local targets, _, state = optimizer(graph, nil, { weight })
+  assert_eq(state.sync_period, 5)
+  assert_eq(state.slow_step_size, 0.5)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(state.initializers) })
+  local function read(variable) return session:run({}, { variable.read })[1]
+    :totable()[1][1] end
+  near(read(weight), 3, 1e-6, "initialized fast weight")
+  near(read(state.slow_weights[1]), 3, 1e-6, "initialized slow weight")
+  session:run({}, {}, targets)
+  near(read(weight), 2.9, 1e-6, "fast weight after non-sync step")
+  near(read(state.slow_weights[1]), 3, 1e-6, "slow weight before sync")
+  session:close()
+end)
+
+test("Lookahead wraps LAMB and synchronizes after the period", function()
+  math.randomseed(48)
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 1 }, "la_input")
+  local target = tf.placeholder(graph, "float32", { 2, 1 }, "la_target")
+  local weight = require("tensorflow.train").variable(graph, { { 2.0 } },
+    "la_lamb_weight", { dtype = "float32" })
+  local output = tf.matmul(graph, input, weight.read, "la_output", "float32")
+  local loss = tf.losses.mean_squared_error(graph, output, target,
+    { axes = { 0, 1 } })
+  local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
+    { sync_period = 2, slow_step_size = 0.5, learning_rate = 0.05 })
+  local targets, _, state = optimizer(graph, loss, { weight })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  local function read(variable) return session:run({}, { variable.read })[1]
+    :totable()[1][1] end
+  local feeds = { [input] = { { 1 }, { 2 } }, [target] = { { 1 }, { 2 } } }
+  session:run(feeds, {}, targets)
+  near(read(state.slow_weights[1]), 2, 1e-6, "slow weight after first step")
+  assert_true(read(weight) ~= 2, "LAMB did not update the fast weight")
+  session:run(feeds, {}, targets)
+  near(read(weight), read(state.slow_weights[1]), 1e-6,
+    "LAMB fast and slow weights after sync")
+  session:close()
+end)
+
 test("triplet loss uses the configured margin", function()
   local graph = tf.Graph.new()
   local anchor = tf.placeholder(graph, "float32", { 1 }, "anchor")

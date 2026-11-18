@@ -30,6 +30,8 @@ local box_loss = tfa.losses.giou(graph, boxes, predicted_boxes)
 local metric = tfa.metrics.f1_score(graph, predictions, labels)
 local layer = tfa.layers.group_normalization(graph, input, 4,
   { input_shape = { 8, 8, 16 } })
+local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
+  { sync_period = 5, slow_step_size = 0.5, learning_rate = 0.001 })
 ```
 
 ### Activations
@@ -79,6 +81,27 @@ are available; further specialized losses remain on the parity roadmap.
 
 - `LAMB`
 - `NovoGrad`
+- `Lookahead` (wrapper)
+
+`Lookahead(base_optimizer, options)` wraps a core optimizer function such as
+`tfa.optimizers.LAMB` or `tfa.optimizers.NovoGrad`. It keeps a slow copy of
+every variable and updates the fast weights through the base optimizer. Every
+`sync_period` steps (default `5`) the fast weights are blended toward the slow
+weights by `slow_step_size` (default `0.5`) and both copies are synchronized.
+
+```lua
+local lookahead = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
+  { sync_period = 5, slow_step_size = 0.5, learning_rate = 0.01 })
+local targets, gradients, state = lookahead(graph, loss, { weight })
+session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+session:run(feeds, {}, targets)
+```
+
+Options other than `sync_period`, `slow_step_size`, `name`, and `base_name` are
+forwarded to the base optimizer; call-time options override construction-time
+options. The returned state includes the usual `initializers` and `variables`,
+plus `slow_weights` (parallel to the variable list), `step`, `base_state`, and
+the resolved `sync_period`/`slow_step_size`.
 
 ### Callbacks
 
@@ -94,7 +117,7 @@ Still to port from TensorFlow Addons:
 - Poisson/quantization layers;
 - further specialized losses beyond the implemented set;
 - Cohen kappa and multi-class metric coverage;
-- LazyAdam, Lookahead, and weight-decay optimizer wrappers;
+- LazyAdam and weight-decay optimizer wrappers;
 - RNN/text/seq2seq addons;
 - image augmentations and preprocessing;
 - TQDM and CSV logging callbacks.
