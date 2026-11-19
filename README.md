@@ -28,6 +28,10 @@ local activation = tfa.activations.gelu(graph, input, "gelu")
 local loss = tfa.losses.focal(graph, labels, predictions, { gamma = 2 })
 local box_loss = tfa.losses.giou(graph, boxes, predicted_boxes)
 local metric = tfa.metrics.f1_score(graph, predictions, labels)
+local macro_f1 = tfa.metrics.f1_score(graph, predicted_classes, one_hot_labels,
+  { average = "macro", num_classes = 3 })
+local kappa = tfa.metrics.cohen_kappa(graph, confusion_matrix,
+  { weights = "quadratic" })
 local layer = tfa.layers.group_normalization(graph, input, 4,
   { input_shape = { 8, 8, 16 } })
 local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
@@ -57,19 +61,42 @@ the leading dimensions one-vs-one and returns the mean `1 - GIoU` loss. Use
 configure the graph namespace, numeric type, and zero-area denominator guard.
 `tfa.losses.giou_loss` is provided as a TensorFlow Addons-style alias.
 
-- `multiclass_f1` macro F1
-
 Loss roadmap: `focal`, `dice`, `tversky`, `triplet`, `contrastive`, and `giou`
 are available; further specialized losses remain on the parity roadmap.
 
 ### Metrics
 
-- `f1_score`
+- `f1_score` (binary threshold or multiclass averages)
 - `fbeta_score`
 - `matthews_corrcoef`
-- `cohen_kappa`
+- `cohen_kappa` (binary or multiclass weighted)
 - `r_square`
 - `pearson_correlation`
+- `multiclass_f1` (legacy macro-F1 helper)
+
+`f1_score(graph, predictions, labels, options)` keeps the binary threshold API
+by default: scalar predictions are compared with `options.threshold` (default
+`0.5`). Set `options.average` to `"macro"`, `"micro"`, or `"weighted"` to use
+multiclass averaging. Multiclass inputs may be integer class ids or one-hot /
+score rows; `options.num_classes` sets the class count, and when it is omitted
+the count is inferred from one-hot widths or the largest class id. Use
+`options.predictions_one_hot` and `options.labels_one_hot` to override the
+integer-versus-one-hot inference. `"weighted"` weights each class by its true
+label support, while `"micro"` computes a single global F1 from all classes.
+
+`cohen_kappa(graph, predictions, labels, options)` also keeps the binary
+threshold API. For multiclass kappa, pass integer class ids or one-hot rows and
+set `options.num_classes` when the class count cannot be inferred. Weighted
+kappa uses `options.weights = "none" | "linear" | "quadratic"` (default
+`"none"`); `options.weightage` is accepted as an alias. An already-computed
+confusion matrix can be passed as the `predictions` argument:
+
+```lua
+local kappa = tfa.metrics.cohen_kappa(graph, confusion_matrix,
+  { weights = "quadratic" })
+```
+
+Both metrics accept `options.name` for the graph namespace.
 
 ### Layers
 
@@ -131,7 +158,7 @@ Still to port from TensorFlow Addons:
 
 - Poisson/quantization layers;
 - further specialized losses beyond the implemented set;
-- Cohen kappa and multi-class metric coverage;
+- further specialized metrics beyond binary and multiclass classification;
 - LazyAdam and weight-decay optimizer wrappers;
 - RNN/text/seq2seq addons;
 - image augmentations and preprocessing;

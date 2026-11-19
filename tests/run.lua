@@ -525,6 +525,140 @@ test("multiclass_f1 reports macro F1", function()
   session:close()
 end)
 
+test("multiclass f1 is one for perfect predictions", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "int32", { 4 }, "mf1_pred")
+  local labels = tf.placeholder(graph, "float32", { 4, 3 }, "mf1_labels")
+  local outputs = {
+    tfa.metrics.f1_score(graph, predictions, labels,
+      { average = "macro", num_classes = 3, name = "mf1_macro" }),
+    tfa.metrics.f1_score(graph, predictions, labels,
+      { average = "micro", num_classes = 3, name = "mf1_micro" }),
+    tfa.metrics.f1_score(graph, predictions, labels,
+      { average = "weighted", num_classes = 3, name = "mf1_weighted" }),
+  }
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [predictions] = { 0, 1, 2, 0 },
+    [labels] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 0 } },
+  }, outputs)
+  for index = 1, 3 do
+    near(values[index]:totable(), 1, 1e-6, "perfect f1 " .. index)
+  end
+  session:close()
+end)
+
+test("multiclass f1 distinguishes macro, micro, and weighted averages",
+    function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "int32", { 5 }, "mf1_avg_pred")
+  local labels = tf.placeholder(graph, "float32", { 5, 3 }, "mf1_avg_labels")
+  local outputs = {
+    tfa.metrics.f1_score(graph, predictions, labels,
+      { average = "macro", name = "mf1_avg_macro" }),
+    tfa.metrics.f1_score(graph, predictions, labels,
+      { average = "micro", name = "mf1_avg_micro" }),
+    tfa.metrics.f1_score(graph, predictions, labels,
+      { average = "weighted", name = "mf1_avg_weighted" }),
+  }
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [predictions] = { 0, 0, 1, 2, 2 },
+    [labels] = { { 1, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 },
+      { 0, 0, 1 } },
+  }, outputs)
+  near(values[1]:totable(), 22 / 45, 1e-6, "macro f1")
+  near(values[2]:totable(), 3 / 5, 1e-6, "micro f1")
+  near(values[3]:totable(), 46 / 75, 1e-6, "weighted f1")
+  session:close()
+end)
+
+test("multiclass f1 accepts one-hot predictions and class labels", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 5, 3 },
+    "mf1_hot_pred")
+  local labels = tf.placeholder(graph, "int32", { 5 }, "mf1_class_labels")
+  local metric = tfa.metrics.f1_score(graph, predictions, labels,
+    { average = "weighted", num_classes = 3 })
+  local values = run(graph, {
+    [predictions] = { { 1, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 },
+      { 0, 0, 1 }, { 0, 0, 1 } },
+    [labels] = { 0, 0, 0, 1, 2 },
+  }, metric)
+  near(values, 46 / 75, 1e-6, "weighted one-hot f1")
+end)
+
+test("Cohen's kappa supports weighted multiclass confusion matrices",
+    function()
+  local graph = tf.Graph.new()
+  local matrix = tf.placeholder(graph, "float32", { 3, 3 }, "ck_matrix")
+  local predictions = tf.placeholder(graph, "int32", { 5 }, "ck_pred")
+  local labels = tf.placeholder(graph, "int32", { 5 }, "ck_labels")
+  local outputs = {
+    tfa.metrics.cohen_kappa(graph, matrix,
+      { weights = "none", name = "ck_none" }),
+    tfa.metrics.cohen_kappa(graph, matrix,
+      { weights = "linear", name = "ck_linear" }),
+    tfa.metrics.cohen_kappa(graph, matrix,
+      { weights = "quadratic", name = "ck_quadratic" }),
+    tfa.metrics.cohen_kappa(graph, predictions, labels,
+      { weights = "quadratic", name = "ck_from_classes" }),
+  }
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [matrix] = { { 2, 1, 0 }, { 0, 0, 1 }, { 0, 0, 1 } },
+    [predictions] = { 0, 0, 1, 2, 2 },
+    [labels] = { 0, 0, 0, 1, 2 },
+  }, outputs)
+  near(values[1]:totable(), 3 / 8, 1e-6, "unweighted kappa")
+  near(values[2]:totable(), 7 / 12, 1e-6, "linear kappa")
+  near(values[3]:totable(), 3 / 4, 1e-6, "quadratic kappa")
+  near(values[4]:totable(), 3 / 4, 1e-6, "kappa from class labels")
+  session:close()
+end)
+
+test("multiclass metrics reject invalid options and shapes", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 2 }, "inv_pred")
+  local labels = tf.placeholder(graph, "float32", { 2 }, "inv_labels")
+  local invalid_average = pcall(tfa.metrics.f1_score, graph, predictions,
+    labels, { average = "median" })
+  assert_true(not invalid_average, "invalid f1 average should fail")
+  local invalid_classes = pcall(tfa.metrics.f1_score, graph, predictions,
+    labels, { average = "macro", num_classes = 1 })
+  assert_true(not invalid_classes, "invalid num_classes should fail")
+  local invalid_weights = pcall(tfa.metrics.cohen_kappa, graph, predictions,
+    labels, { weights = "cubic" })
+  assert_true(not invalid_weights, "invalid kappa weights should fail")
+
+  local mismatched = pcall(function()
+    local bad_graph = tf.Graph.new()
+    local bad_predictions = tf.placeholder(bad_graph, "int32", { 3 },
+      "bad_pred")
+    local bad_labels = tf.placeholder(bad_graph, "float32", { 2, 3 },
+      "bad_labels")
+    local bad_metric = tfa.metrics.f1_score(bad_graph, bad_predictions,
+      bad_labels, { average = "macro", num_classes = 3 })
+    local session = tf.Session.new(bad_graph)
+    session:run({ [bad_predictions] = { 0, 1, 2 },
+      [bad_labels] = { { 1, 0, 0 }, { 0, 1, 0 } } }, { bad_metric })
+    session:close()
+  end)
+  assert_true(not mismatched, "mismatched prediction and label shapes fail")
+
+  local nonsquare = pcall(function()
+    local matrix_graph = tf.Graph.new()
+    local matrix = tf.placeholder(matrix_graph, "float32", { 2, 3 },
+      "bad_matrix")
+    local bad_kappa = tfa.metrics.cohen_kappa(matrix_graph, matrix,
+      { weights = "quadratic" })
+    local session = tf.Session.new(matrix_graph)
+    session:run({ [matrix] = { { 1, 0, 0 }, { 0, 1, 0 } } }, { bad_kappa })
+    session:close()
+  end)
+  assert_true(not nonsquare, "non-square confusion matrix should fail")
+end)
+
 test("image flips and brightness adjust preserve shape", function()
   local graph = tf.Graph.new()
   local input = tf.placeholder(graph, "float32", { 1, 2, 3, 1 }, "img")

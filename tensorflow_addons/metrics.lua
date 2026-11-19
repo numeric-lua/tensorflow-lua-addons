@@ -33,9 +33,179 @@ local function binary_counts(graph, predictions, labels, threshold, name)
   return tp, fp, fn, tn
 end
 
+local integer_dtypes = {
+  int8 = true,
+  int16 = true,
+  int32 = true,
+  int64 = true,
+  uint8 = true,
+  uint16 = true,
+  uint32 = true,
+  uint64 = true,
+}
+
+local function tensor_dtype(tensor, fallback)
+  return (type(tensor) == "table" and tensor.dtype) or fallback or "float32"
+end
+
+local function is_integer_dtype(dtype)
+  return integer_dtypes[dtype] == true
+end
+
+local function cast_to_int64(graph, tensor, name)
+  local dtype = tensor_dtype(tensor)
+  if dtype == "int64" then return tensor end
+  return tf.cast(graph, tensor, dtype, "int64", name)
+end
+
+-- Convert labels or predictions to integer class ids.  Integer tensors are
+-- already class ids; floating point tensors are one-hot rows or score vectors.
+local function tensor_classes(graph, tensor, options, one_hot_option, name)
+  local dtype = tensor_dtype(tensor, options.dtype)
+  local one_hot = options[one_hot_option]
+  if one_hot == nil then one_hot = not is_integer_dtype(dtype) end
+  if one_hot then
+    return tf.argmax(graph, tensor, -1, name .. "/argmax", dtype, "int64"),
+      true
+  end
+  return cast_to_int64(graph, tensor, name .. "/cast"), false
+end
+
+local function last_dimension(graph, tensor, name)
+  local shape = tf.shape(graph, tensor, name .. "/input_shape",
+    tensor_dtype(tensor))
+  local begin = tf.constant(graph, { -1 }, name .. "/begin", "int32")
+  local limit = tf.constant(graph, { 2147483647 }, name .. "/end", "int32")
+  local stride = tf.constant(graph, { 1 }, name .. "/stride", "int32")
+  local desc = graph:new_operation("StridedSlice", name .. "/slice")
+  desc:add_input(shape)
+  desc:add_input(begin)
+  desc:add_input(limit)
+  desc:add_input(stride)
+  desc:set_type("T", "int32")
+  desc:set_type("Index", "int32")
+  desc:set_int("begin_mask", 0)
+  desc:set_int("end_mask", 0)
+  desc:set_int("ellipsis_mask", 0)
+  desc:set_int("new_axis_mask", 0)
+  desc:set_int("shrink_axis_mask", 0)
+  local sliced = desc:finish()
+  return tf.reshape(graph, sliced, {}, name .. "/scalar", "int32")
+end
+
+local function class_count(graph, predictions, labels, pred_one_hot,
+    label_one_hot, options, name)
+  if options.num_classes ~= nil then
+    return tf.constant(graph, options.num_classes, name .. "/count", "int32")
+  end
+  if label_one_hot then
+    return last_dimension(graph, labels, name .. "/label_dimension")
+  end
+  if pred_one_hot then
+    return last_dimension(graph, predictions, name .. "/pred_dimension")
+  end
+  local label_classes = cast_to_int64(graph, labels, name .. "/label_int")
+  local pred_classes = cast_to_int64(graph, predictions, name .. "/pred_int")
+  local label_max = tf.reduce_max(graph, label_classes, { 0 },
+    name .. "/label_max", "int64", false)
+  local pred_max = tf.reduce_max(graph, pred_classes, { 0 },
+    name .. "/pred_max", "int64", false)
+  local maximum = tf.maximum(graph, label_max, pred_max, name .. "/maximum",
+    "int64")
+  local one = tf.constant(graph, 1, name .. "/one", "int64")
+  local two = tf.constant(graph, 2, name .. "/two", "int64")
+  local count = tf.maximum(graph, tf.add(graph, maximum, one,
+    name .. "/plus_one", "int64"), two, name .. "/at_least_two", "int64")
+  return tf.cast(graph, count, "int64", "int32", name .. "/count")
+end
+
+local function one_hot_classes(graph, indices, depth, name)
+  local depth_op = depth
+  if type(depth) == "number" then
+    depth_op = tf.constant(graph, depth, name .. "/depth", "int32")
+  end
+  local desc = graph:new_operation("OneHot", name)
+  desc:add_input(indices)
+  desc:add_input(depth_op)
+  desc:add_input(tf.constant(graph, 1, name .. "/on", "float32"))
+  desc:add_input(tf.constant(graph, 0, name .. "/off", "float32"))
+  desc:set_type("T", "float32")
+  desc:set_type("TI", "int64")
+  desc:set_int("axis", -1)
+  return desc:finish()
+end
+
+local function validate_num_classes(value, name)
+  if value == nil then return end
+  if type(value) ~= "number" or value % 1 ~= 0 or value < 2 then
+    error(name .. " requires num_classes to be an integer >= 2", 4)
+  end
+end
+
+local function multiclass_f1(graph, predictions, labels, options, name)
+  local average = options.average or "macro"
+  if average ~= "macro" and average ~= "micro" and average ~= "weighted" then
+    error("f1_score average must be 'macro', 'micro', or 'weighted'", 4)
+  end
+  local pred_classes, pred_one_hot = tensor_classes(graph, predictions,
+    options, "predictions_one_hot", name .. "/predictions")
+  local label_classes, label_one_hot = tensor_classes(graph, labels, options,
+    "labels_one_hot", name .. "/labels")
+  local count = class_count(graph, predictions, labels, pred_one_hot,
+    label_one_hot, options, name .. "/classes")
+  local pred_hot = one_hot_classes(graph, pred_classes, count,
+    name .. "/predicted_one_hot")
+  local label_hot = one_hot_classes(graph, label_classes, count,
+    name .. "/labels_one_hot")
+  local pred_support = tf.reduce_sum(graph, pred_hot, { 0 },
+    name .. "/predicted_support", "float32", false)
+  local label_support = tf.reduce_sum(graph, label_hot, { 0 },
+    name .. "/label_support", "float32", false)
+  local true_positive = tf.reduce_sum(graph, tf.mul(graph, pred_hot,
+    label_hot, name .. "/true_positive_tensor", "float32"), { 0 },
+    name .. "/true_positive", "float32", false)
+  local false_positive = tf.sub(graph, pred_support, true_positive,
+    name .. "/false_positive", "float32")
+  local false_negative = tf.sub(graph, label_support, true_positive,
+    name .. "/false_negative", "float32")
+  local two = tf.constant(graph, 2, name .. "/two", "float32")
+  local per_class = Ops.clean_div(graph, tf.mul(graph, two, true_positive,
+    name .. "/numerator", "float32"), tf.add(graph, tf.mul(graph, two,
+    true_positive, name .. "/two_tp", "float32"), tf.add(graph,
+    false_positive, false_negative, name .. "/errors", "float32"),
+    name .. "/denominator", "float32"), name .. "/per_class", "float32")
+  if average == "macro" then
+    return tf.reduce_mean(graph, per_class, { 0 }, name, "float32", false)
+  end
+  if average == "micro" then
+    local tp = Ops.sum_all(graph, true_positive, name .. "/tp_total",
+      "float32")
+    local fp = Ops.sum_all(graph, false_positive, name .. "/fp_total",
+      "float32")
+    local fn = Ops.sum_all(graph, false_negative, name .. "/fn_total",
+      "float32")
+    local numerator = tf.mul(graph, two, tp, name .. "/micro_numerator",
+      "float32")
+    return Ops.clean_div(graph, numerator, tf.add(graph, numerator,
+      tf.add(graph, fp, fn, name .. "/micro_errors", "float32"),
+      name .. "/micro_denominator", "float32"), name, "float32")
+  end
+  local weighted = tf.mul(graph, per_class, label_support,
+    name .. "/weighted", "float32")
+  return Ops.clean_div(graph, Ops.sum_all(graph, weighted,
+    name .. "/weighted_sum", "float32"), Ops.sum_all(graph, label_support,
+    name .. "/support_sum", "float32"), name, "float32")
+end
+
 function Metrics.f1_score(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "f1_score"
+  validate_num_classes(options.num_classes, name)
+  local multiclass = options.average ~= nil or options.num_classes ~= nil or
+    options.predictions_one_hot ~= nil or options.labels_one_hot ~= nil
+  if multiclass then
+    return multiclass_f1(graph, predictions, labels, options, name)
+  end
   local threshold = options.threshold or 0.5
   local tp, fp, fn = binary_counts(graph, predictions, labels, threshold, name)
   local numerator = tf.mul(graph, tf.constant(graph, 2, name .. "/two",
@@ -100,9 +270,143 @@ function Metrics.r_square(graph, predictions, labels, options)
     name, "float32")
 end
 
+local function is_graph_tensor(value)
+  return type(value) == "table" and value.oper ~= nil
+end
+
+local function resolve_kappa_weights(options, name)
+  local scheme = options.weights or options.weightage or "none"
+  if scheme ~= "none" and scheme ~= "linear" and scheme ~= "quadratic" then
+    error(name .. " weights must be 'none', 'linear', or 'quadratic'", 4)
+  end
+  return scheme
+end
+
+local function transpose_2d(graph, input, name)
+  local perm = tf.constant(graph, { 1, 0 }, name .. "/perm", "int32")
+  local desc = graph:new_operation("Transpose", name)
+  desc:add_input(input)
+  desc:add_input(perm)
+  desc:set_type("T", "float32")
+  desc:set_type("Tperm", "int32")
+  return desc:finish()
+end
+
+local function class_range(graph, count, name)
+  local start = tf.constant(graph, 0, name .. "/start", "int32")
+  local delta = tf.constant(graph, 1, name .. "/delta", "int32")
+  local desc = graph:new_operation("Range", name)
+  desc:add_input(start)
+  desc:add_input(count)
+  desc:add_input(delta)
+  desc:set_type("Tidx", "int32")
+  return desc:finish()
+end
+
+local function kappa_weights(graph, count, scheme, name)
+  local indices = class_range(graph, count, name .. "/indices")
+  local row = tf.reshape(graph, indices, { -1, 1 }, name .. "/row", "int32")
+  local column = tf.reshape(graph, indices, { 1, -1 }, name .. "/column",
+    "int32")
+  if scheme == "none" then
+    local desc = graph:new_operation("Equal", name .. "/equal")
+    desc:add_input(row)
+    desc:add_input(column)
+    desc:set_type("T", "int32")
+    return tf.cast(graph, desc:finish(), "bool", "float32", name .. "/weights")
+  end
+  local difference = tf.abs(graph, tf.sub(graph, row, column,
+    name .. "/difference", "int32"), name .. "/absolute", "int32")
+  local difference_float = tf.cast(graph, difference, "int32", "float32",
+    name .. "/difference_float")
+  local one = tf.constant(graph, 1, name .. "/one", "int32")
+  local denominator = tf.cast(graph, tf.sub(graph, count, one,
+    name .. "/classes_minus_one", "int32"), "int32", "float32",
+    name .. "/denominator")
+  local distance = tf.div(graph, difference_float, denominator,
+    name .. "/distance", "float32")
+  if scheme == "linear" then
+    return tf.sub(graph, tf.constant(graph, 1, name .. "/one_float",
+      "float32"), distance, name .. "/weights", "float32")
+  end
+  return tf.sub(graph, tf.constant(graph, 1, name .. "/one_float_q",
+    "float32"), tf.mul(graph, distance, distance, name .. "/squared",
+    "float32"), name .. "/weights", "float32")
+end
+
+local function weighted_kappa(graph, confusion, count, scheme, name)
+  local total = Ops.sum_all(graph, confusion, name .. "/total", "float32")
+  local weights = kappa_weights(graph, count, scheme, name .. "/weights")
+  local observed = Ops.clean_div(graph, Ops.sum_all(graph, tf.mul(graph,
+    confusion, weights, name .. "/weighted_confusion", "float32"),
+    name .. "/observed_sum", "float32"), total, name .. "/observed", "float32")
+  local actual = tf.reduce_sum(graph, confusion, { 1 }, name .. "/actual",
+    "float32", false)
+  local predicted = tf.reduce_sum(graph, confusion, { 0 },
+    name .. "/predicted", "float32", false)
+  local actual_matrix = tf.reshape(graph, actual, { -1, 1 },
+    name .. "/actual_matrix", "float32")
+  local predicted_matrix = tf.reshape(graph, predicted, { 1, -1 },
+    name .. "/predicted_matrix", "float32")
+  local expected_counts = tf.mul(graph, actual_matrix, predicted_matrix,
+    name .. "/expected_counts", "float32")
+  local expected = Ops.clean_div(graph, Ops.sum_all(graph, tf.mul(graph,
+    expected_counts, weights, name .. "/expected_weighted", "float32"),
+    name .. "/expected_sum", "float32"), tf.mul(graph, total, total,
+    name .. "/total_square", "float32"), name .. "/expected", "float32")
+  local one = tf.constant(graph, 1, name .. "/one", "float32")
+  return Ops.clean_div(graph, tf.sub(graph, observed, expected,
+    name .. "/difference", "float32"), tf.sub(graph, one, expected,
+    name .. "/one_minus_expected", "float32"), name, "float32")
+end
+
+local function multiclass_confusion(graph, predictions, labels, options, name)
+  local pred_classes, pred_one_hot = tensor_classes(graph, predictions,
+    options, "predictions_one_hot", name .. "/predictions")
+  local label_classes, label_one_hot = tensor_classes(graph, labels, options,
+    "labels_one_hot", name .. "/labels")
+  local count = class_count(graph, predictions, labels, pred_one_hot,
+    label_one_hot, options, name .. "/classes")
+  local pred_hot = one_hot_classes(graph, pred_classes, count,
+    name .. "/predicted_one_hot")
+  local label_hot = one_hot_classes(graph, label_classes, count,
+    name .. "/labels_one_hot")
+  local label_transposed = transpose_2d(graph, label_hot,
+    name .. "/labels_transposed")
+  return tf.matmul(graph, label_transposed, pred_hot, name .. "/matrix",
+    "float32"), count
+end
+
 function Metrics.cohen_kappa(graph, predictions, labels, options)
+  if not is_graph_tensor(labels) then
+    if options == nil then options = labels end
+    labels = nil
+  end
   options = options or {}
   local name = options.name or "cohen_kappa"
+  validate_num_classes(options.num_classes, name)
+  local scheme = resolve_kappa_weights(options, name)
+  local confusion_matrix = labels == nil or options.confusion_matrix == true or
+    options.is_confusion_matrix == true
+  local multiclass = confusion_matrix or options.num_classes ~= nil or
+    options.weights ~= nil or options.weightage ~= nil
+  if multiclass then
+    local confusion, count
+    if confusion_matrix then
+      confusion = tf.cast(graph, predictions, tensor_dtype(predictions),
+        "float32", name .. "/confusion")
+      if options.num_classes ~= nil then
+        count = tf.constant(graph, options.num_classes, name .. "/classes",
+          "int32")
+      else
+        count = last_dimension(graph, predictions, name .. "/classes")
+      end
+    else
+      confusion, count = multiclass_confusion(graph, predictions, labels,
+        options, name)
+    end
+    return weighted_kappa(graph, confusion, count, scheme, name)
+  end
   local tp, fp, fn, tn = binary_counts(graph, predictions, labels,
     options.threshold or 0.5, name)
   local total = tf.add(graph, tf.add(graph, tp, fp, name .. "/total_pos",
