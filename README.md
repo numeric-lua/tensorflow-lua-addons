@@ -6,7 +6,7 @@ Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
 
-This is a 0.7.0 parity subset, not yet a complete TensorFlow Addons port.
+This is a 0.8.0 parity subset, not yet a complete TensorFlow Addons port.
 See the parity table below for what exists today.
 
 ## Install
@@ -104,6 +104,13 @@ forwarded to the base optimizer; call-time options override construction-time
 options. The returned state includes the usual `initializers` and `variables`,
 plus `slow_weights` (parallel to the variable list), `step`, `base_state`, and
 the resolved `sync_period`/`slow_step_size`.
+
+### Image
+
+- `flip_left_right`
+- `flip_up_down`
+- `adjust_brightness`
+- `resize_nearest`
 
 ### Callbacks
 

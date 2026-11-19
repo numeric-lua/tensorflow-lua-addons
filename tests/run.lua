@@ -525,6 +525,19 @@ test("multiclass_f1 reports macro F1", function()
   session:close()
 end)
 
+test("image flips and brightness adjust preserve shape", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 3, 1 }, "img")
+  local left = tfa.image.flip_left_right(graph, input, "flip_lr")
+  local up = tfa.image.flip_up_down(graph, input, "flip_ud")
+  local bright = tfa.image.adjust_brightness(graph, input, 0.5, "bright")
+  local session = tf.Session.new(graph)
+  local output = session:run({ [input] = { { { { 1 }, { 2 }, { 3 } }, { { 4 }, { 5 }, { 6 } } } } },
+    { left, up, bright })[1]
+  assert_eq(table.concat(output:shape(), ","), "1,2,3,1")
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then

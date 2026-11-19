@@ -1,4 +1,4 @@
-# tensorflow-lua-addons 0.7.0
+# tensorflow-lua-addons 0.8.0
 
-- macro multi-class F1 metric;
-- 24 tests.
+- image flip, brightness, and nearest-resize helpers;
+- 25 tests.
