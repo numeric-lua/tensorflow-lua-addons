@@ -83,6 +83,39 @@ function Layers.instance_normalization(graph, input, options)
   end
   local channels = shape[#shape]
 
+-- Poisson layer.  Sampling is deterministic unless the caller supplies
+-- options.noise; with noise it applies the standard inverse-CDF transform.
+function Layers.poisson(graph, log_rate, options)
+  options = options or {}
+  local name = options.name or "poisson"
+  local dtype = options.dtype or "float32"
+  local tf = require("tensorflow")
+  local rate = tf.exp(graph, log_rate, name .. "/rate", dtype)
+  if options.noise == nil then return rate end
+  local transformed = tf.sub(graph, tf.constant(graph, 1, name .. "/one", dtype),
+    options.noise, name .. "/complement", dtype)
+  return tf.mul(graph, tf.constant(graph, -1, name .. "/negative", dtype),
+    tf.log(graph, tf.maximum(graph, transformed,
+      tf.constant(graph, 1e-7, name .. "/epsilon", dtype), name .. "/safe",
+      dtype), name .. "/log", dtype), name, dtype)
+end
+
+function Layers.quantization(graph, input, options)
+  options = options or {}
+  local name = options.name or "quantization"
+  local dtype = options.dtype or "float32"
+  local min_value = options.min_value or -6
+  local max_value = options.max_value or 6
+  local desc = graph:new_operation("FakeQuantWithMinMaxVars", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, min_value, name .. "/min", dtype))
+  desc:add_input(tf.constant(graph, max_value, name .. "/max", dtype))
+  desc:set_int("num_bits", options.num_bits or 8)
+  desc:set_bool("narrow_range", options.narrow_range == true)
+  return desc:finish()
+end
+
+
 return Layers.group_normalization(graph, input, channels,
     { input_shape = shape, epsilon = options.epsilon,
       dtype = options.dtype, name = options.name or "instance_normalization" })
@@ -226,5 +259,38 @@ return {
   sigma = sigma, weight_shape = shape,
 }
 end
+
+-- Poisson layer.  Sampling is deterministic unless the caller supplies
+-- options.noise; with noise it applies the standard inverse-CDF transform.
+function Layers.poisson(graph, log_rate, options)
+  options = options or {}
+  local name = options.name or "poisson"
+  local dtype = options.dtype or "float32"
+  local tf = require("tensorflow")
+  local rate = tf.exp(graph, log_rate, name .. "/rate", dtype)
+  if options.noise == nil then return rate end
+  local transformed = tf.sub(graph, tf.constant(graph, 1, name .. "/one", dtype),
+    options.noise, name .. "/complement", dtype)
+  return tf.mul(graph, tf.constant(graph, -1, name .. "/negative", dtype),
+    tf.log(graph, tf.maximum(graph, transformed,
+      tf.constant(graph, 1e-7, name .. "/epsilon", dtype), name .. "/safe",
+      dtype), name .. "/log", dtype), name, dtype)
+end
+
+function Layers.quantization(graph, input, options)
+  options = options or {}
+  local name = options.name or "quantization"
+  local dtype = options.dtype or "float32"
+  local min_value = options.min_value or -6
+  local max_value = options.max_value or 6
+  local desc = graph:new_operation("FakeQuantWithMinMaxVars", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, min_value, name .. "/min", dtype))
+  desc:add_input(tf.constant(graph, max_value, name .. "/max", dtype))
+  desc:set_int("num_bits", options.num_bits or 8)
+  desc:set_bool("narrow_range", options.narrow_range == true)
+  return desc:finish()
+end
+
 
 return Layers

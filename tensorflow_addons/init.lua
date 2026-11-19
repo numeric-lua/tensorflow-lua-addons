@@ -2,7 +2,7 @@
 -- TensorFlow Addons for LuaJIT.
 --
 local Addons = {
-  VERSION = "0.8.0",
+  VERSION = "0.9.0",
   activations = require("tensorflow_addons.activations"),
   losses = require("tensorflow_addons.losses"),
   metrics = require("tensorflow_addons.metrics"),

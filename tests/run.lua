@@ -538,6 +538,23 @@ test("image flips and brightness adjust preserve shape", function()
   session:close()
 end)
 
+test("weight decay wrapper and quantization layer build graphs", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 2 }, "qin")
+  local quant = tfa.layers.quantization(graph, input, { name = "q" })
+  local weight = tf.variable(graph, { { 1, 1 }, { 1, 1 } }, "w")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, quant, weight.read,
+    "weighted", "float32"), { 0, 1 }, "qloss", "float32")
+  local optimizer = tfa.optimizers.WeightDecay("adam", { weight_decay = 0.01 })
+  local updates = optimizer(graph, loss, { weight })
+  assert_true(#updates > 0)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer })
+  local output = session:run({ [input] = { { 1, 2 }, { 3, 4 } } }, { quant })[1]
+  assert_eq(table.concat(output:shape(), ","), "2,2")
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then

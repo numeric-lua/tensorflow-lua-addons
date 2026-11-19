@@ -1,4 +1,5 @@
-# tensorflow-lua-addons 0.8.0
+# tensorflow-lua-addons 0.9.0
 
-- image flip, brightness, and nearest-resize helpers;
-- 25 tests.
+- WeightDecay optimizer wrapper;
+- Poisson and quantization layers;
+- 26 tests.

@@ -485,4 +485,26 @@ function Optimizers.Lookahead(base_optimizer, options, direct_loss,
   end
 end
 
+-- Decoupled weight-decay wrapper.  The base optimizer is responsible for
+-- applying the decay (the core Adam/SGD implementations support weight_decay).
+function Optimizers.WeightDecay(base_optimizer, options)
+  if type(base_optimizer) == "table" and options == nil then
+    options = base_optimizer
+    base_optimizer = options.base_optimizer or options.base or options.optimizer
+  end
+  base_optimizer = resolve_optimizer(base_optimizer)
+  if not is_callable(base_optimizer) then
+    error("WeightDecay expects a callable base optimizer", 2)
+  end
+  local config = options or {}
+  local decay = config.weight_decay or config.wd or 0.01
+  return function(graph, loss, variables, call_options)
+    local merged = merge_tables(config, call_options or {})
+    merged.weight_decay = decay
+    merged.wd = decay
+    return base_optimizer(graph, loss, variables, merged)
+  end
+end
+
+
 return Optimizers

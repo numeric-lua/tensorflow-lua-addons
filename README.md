@@ -6,7 +6,7 @@ Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
 
-This is a 0.8.0 parity subset, not yet a complete TensorFlow Addons port.
+This is a 0.9.0 parity subset, not yet a complete TensorFlow Addons port.
 See the parity table below for what exists today.
 
 ## Install
@@ -79,11 +79,17 @@ are available; further specialized losses remain on the parity roadmap.
 - `weight_normalization`
 - `spectral_normalization`
 
+### Layers extras
+
+- `poisson` (deterministic rate or noise inverse-CDF);
+- `quantization` (fake-quant).
+
 ### Optimizers
 
 - `LAMB`
 - `NovoGrad`
 - `Lookahead` (wrapper)
+- `WeightDecay` (wrapper)
 
 `Lookahead(base_optimizer, options)` wraps a core optimizer function such as
 `tfa.optimizers.LAMB` or `tfa.optimizers.NovoGrad`. It keeps a slow copy of
