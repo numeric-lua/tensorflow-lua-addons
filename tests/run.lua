@@ -511,6 +511,20 @@ test("spectral normalization has a finite norm and updates state", function()
   session:close()
 end)
 
+test("multiclass_f1 reports macro F1", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 3, 3 }, "mcp")
+  local labels = tf.placeholder(graph, "float32", { 3, 3 }, "mcl")
+  local metric = tfa.metrics.multiclass_f1(graph, predictions, labels, 3)
+  local session = tf.Session.new(graph)
+  local value = session:run({
+    [predictions] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
+    [labels] = { { 1, 0, 0 }, { 0, 1, 0 }, { 1, 0, 0 } },
+  }, { metric })[1]:totable()
+  assert_true(value > 0.6 and value < 0.9)
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then

@@ -1,5 +1,4 @@
-# tensorflow-lua-addons 0.6.0
+# tensorflow-lua-addons 0.7.0
 
-- GIoU loss;
-- Lookahead optimizer wrapper;
-- 23 tests.
+- macro multi-class F1 metric;
+- 24 tests.

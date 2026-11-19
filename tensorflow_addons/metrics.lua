@@ -157,4 +157,60 @@ function Metrics.pearson_correlation(graph, predictions, labels, options)
   return Ops.clean_div(graph, covariance, denominator, name, "float32")
 end
 
+-- Macro F1 for dense one-hot predictions/labels.  Class predictions are
+-- compared one-vs-rest and averaged uniformly.
+function Metrics.multiclass_f1(graph, predictions, labels, num_classes, options)
+  options = options or {}
+  local name = options.name or "multiclass_f1"
+  if type(num_classes) ~= "number" or num_classes < 2 then
+    error("multiclass_f1 requires num_classes >= 2", 3)
+  end
+  local dtype = "float32"
+  local pred_classes = tf.argmax(graph, predictions, 1, name .. "/pred",
+    dtype, "int64")
+  local label_classes
+  if labels.dtype == "int32" or labels.dtype == "int64" then
+    label_classes = tf.cast(graph, labels, labels.dtype, "int64",
+      name .. "/labels")
+  else
+    label_classes = tf.argmax(graph, labels, 1, name .. "/label", dtype,
+      "int64")
+  end
+  pred_classes = tf.cast(graph, pred_classes, "int64", "int64",
+    name .. "/pred64")
+  label_classes = tf.cast(graph, label_classes, "int64", "int64",
+    name .. "/label64")
+  local epsilon = tf.constant(graph, 1e-8, name .. "/epsilon", dtype)
+  local pred_hot = tf.one_hot(graph, pred_classes, num_classes,
+    { dtype = dtype, indices_dtype = "int64", name = name .. "/pred_hot" })
+  local label_hot = tf.one_hot(graph, label_classes, num_classes,
+    { dtype = dtype, indices_dtype = "int64", name = name .. "/label_hot" })
+  local total
+  for class = 0, num_classes - 1 do
+    local axis = tf.one_hot(graph, tf.constant(graph, class,
+      name .. "/class_" .. class, "int64"), num_classes,
+      { dtype = dtype, indices_dtype = "int64",
+        name = name .. "/axis_" .. class })
+    local pred_c = tf.reduce_sum(graph, tf.mul(graph, pred_hot, axis,
+      name .. "/pred_one_" .. class, dtype), { 0, 1 },
+      name .. "/pred_count_" .. class, dtype, false)
+    local label_c = tf.reduce_sum(graph, tf.mul(graph, label_hot, axis,
+      name .. "/label_one_" .. class, dtype), { 0, 1 },
+      name .. "/label_count_" .. class, dtype, false)
+    local tp = tf.mul(graph, pred_c, label_c, name .. "/tp_" .. class, dtype)
+    local denominator = tf.add(graph, tf.add(graph, pred_c, label_c,
+      name .. "/sum_" .. class, dtype), epsilon, name .. "/denom_" .. class,
+      dtype)
+    local f1 = Ops.clean_div(graph, tf.mul(graph, tf.constant(graph, 2,
+      name .. "/two_" .. class, dtype), tp, name .. "/num_" .. class, dtype),
+      denominator, name .. "/f1_" .. class, dtype)
+    total = total == nil and f1 or tf.add(graph, total, f1,
+      name .. "/total_" .. class, dtype)
+  end
+  return tf.div(graph, total, tf.constant(graph, num_classes,
+    name .. "/count", dtype), name, dtype)
+
+end
+
+
 return Metrics

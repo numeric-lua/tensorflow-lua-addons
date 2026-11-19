@@ -6,7 +6,7 @@ Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
 
-This is a 0.6.0 parity subset, not yet a complete TensorFlow Addons port.
+This is a 0.7.0 parity subset, not yet a complete TensorFlow Addons port.
 See the parity table below for what exists today.
 
 ## Install
@@ -56,6 +56,8 @@ the leading dimensions one-vs-one and returns the mean `1 - GIoU` loss. Use
 `options.name`, `options.dtype`, and `options.epsilon` (default `1e-7`) to
 configure the graph namespace, numeric type, and zero-area denominator guard.
 `tfa.losses.giou_loss` is provided as a TensorFlow Addons-style alias.
+
+- `multiclass_f1` macro F1
 
 Loss roadmap: `focal`, `dice`, `tversky`, `triplet`, `contrastive`, and `giou`
 are available; further specialized losses remain on the parity roadmap.
