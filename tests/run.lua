@@ -689,6 +689,212 @@ test("weight decay wrapper and quantization layer build graphs", function()
   session:close()
 end)
 
+test("LazyAdam only updates elements with non-zero gradients", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1, 2 }, { 3, 4 } }, "lazy_weight",
+    { dtype = "float32" })
+  local mask = tf.constant(graph, { { 1, 0 }, { 0, 1 } }, "lazy_mask",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, mask,
+    "lazy_weighted", "float32"), { 0, 1 }, "lazy_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.LazyAdam(graph, loss,
+    { weight }, { learning_rate = 0.1 })
+  assert_eq(#gradients, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  session:run({}, {}, targets)
+  local values = session:run({}, { weight.read })[1]:totable()
+  near(values[1][1], 0.8, 1e-6, "lazy weight (1,1)")
+  near(values[1][2], 2, 1e-6, "lazy untouched (1,2)")
+  near(values[2][1], 3, 1e-6, "lazy untouched (2,1)")
+  near(values[2][2], 3.8, 1e-6, "lazy weight (2,2)")
+  local moments = session:run({}, { state.variables[3].read })[1]:totable()
+  near(moments[1][1], 0.19, 1e-6, "lazy first moment")
+  near(moments[1][2], 0, 1e-6, "lazy untouched moment")
+  local beta1_power = session:run({}, { state.beta1_power.read })[1]:totable()
+  near(beta1_power, 0.729, 1e-6, "lazy beta1 power")
+  session:close()
+end)
+
+test("LazyAdam rejects an empty variable list", function()
+  local ok, err = pcall(tfa.optimizers.LazyAdam, tf.Graph.new(), nil, {})
+  assert_true(not ok, "LazyAdam should reject an empty variable list")
+  assert_true(tostring(err):find("non-empty", 1, true) ~= nil,
+    "LazyAdam error should mention a non-empty variable list")
+end)
+
+test("log_cosh matches the stable formula and reductions", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 2 }, "lc_labels")
+  local predictions = tf.placeholder(graph, "float32", { 2 }, "lc_pred")
+  local elementwise = tfa.losses.log_cosh(graph, labels, predictions,
+    { reduction = "none", name = "lc_none" })
+  local mean = tfa.losses.log_cosh(graph, labels, predictions,
+    { reduction = "mean", name = "lc_mean" })
+  local total = tfa.losses.log_cosh(graph, labels, predictions,
+    { reduction = "sum", name = "lc_sum" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 0, 0 },
+    [predictions] = { 1, 1000 },
+  }, { elementwise, mean, total })
+  local single = math.log(math.cosh(1))
+  local large = 1000 - math.log(2)
+  local elements = values[1]:totable()
+  near(elements[1], single, 1e-6, "log_cosh small residual")
+  near(elements[2], large, 1e-3, "log_cosh large residual")
+  near(values[2]:totable(), (single + large) / 2, 1e-3, "log_cosh mean")
+  near(values[3]:totable(), single + large, 1e-3, "log_cosh sum")
+  session:close()
+end)
+
+test("log_cosh rejects an unknown reduction", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 1 }, "lc_bad_labels")
+  local predictions = tf.placeholder(graph, "float32", { 1 }, "lc_bad_pred")
+  local ok = pcall(tfa.losses.log_cosh, graph, labels, predictions,
+    { reduction = "median" })
+  assert_true(not ok, "log_cosh should reject an unknown reduction")
+end)
+
+test("mean_iou averages IoU over classes present in the batch", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "int32", { 4 }, "miou_pred")
+  local labels = tf.placeholder(graph, "int32", { 4 }, "miou_labels")
+  local metric = tfa.metrics.mean_iou(graph, predictions, labels, 4,
+    { name = "miou" })
+  local session = tf.Session.new(graph)
+  local value = session:run({
+    [predictions] = { 0, 1, 2, 2 },
+    [labels] = { 0, 1, 2, 0 },
+  }, { metric })[1]:totable()
+  near(value, 2 / 3, 1e-6, "mean_iou")
+  session:close()
+end)
+
+test("mean_iou accepts one-hot rows and exposes the MeanIoU alias", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 3, 3 }, "miou_hot")
+  local labels = tf.placeholder(graph, "float32", { 3, 3 }, "miou_hot_labels")
+  local metric = tfa.metrics.MeanIoU(graph, predictions, labels,
+    { num_classes = 3, name = "miou_hot_metric" })
+  local value = run(graph, {
+    [predictions] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
+    [labels] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
+  }, metric)
+  near(value, 1, 1e-6, "one-hot mean_iou")
+end)
+
+test("gaussian_filter2d preserves mass and smooths an impulse", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 3, 3, 1 }, "gauss_in")
+  local filtered = tfa.image.gaussian_filter2d(graph, input,
+    { filter_shape = { 3, 3 }, sigma = 1, padding = "CONSTANT",
+      constant_values = 0, name = "gauss" })
+  local session = tf.Session.new(graph)
+  local tensor = session:run({ [input] = { {
+    { { 0 }, { 0 }, { 0 } },
+    { { 0 }, { 1 }, { 0 } },
+    { { 0 }, { 0 }, { 0 } },
+  } } }, { filtered })[1]
+  assert_eq(table.concat(tensor:shape(), ","), "1,3,3,1")
+  local values = tensor:totable()
+  local expected_center = 1 / (1 + 4 * math.exp(-0.5) + 4 * math.exp(-1))
+  near(values[1][2][2][1], expected_center, 1e-6, "gaussian center")
+  local total = 0
+  for _, row in ipairs(values[1]) do
+    for _, pixel in ipairs(row) do total = total + pixel[1] end
+  end
+  near(total, 1, 1e-5, "gaussian mass")
+  session:close()
+end)
+
+test("gaussian_filter2d supports rank-3 images with reflect padding",
+    function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 3, 3, 2 }, "gauss_hwc")
+  local filtered = tfa.image.gaussian_filter2d(graph, input,
+    { rank = 3, filter_shape = { 3, 3 }, sigma = 1, name = "gauss_hwc_out" })
+  local session = tf.Session.new(graph)
+  local tensor = session:run({ [input] = {
+    { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+    { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+    { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+  } }, { filtered })[1]
+  assert_eq(table.concat(tensor:shape(), ","), "3,3,2")
+  local values = tensor:totable()
+  for row = 1, 3 do
+    for column = 1, 3 do
+      for channel = 1, 2 do
+        near(values[row][column][channel], 1, 1e-6, "gaussian constant image")
+      end
+    end
+  end
+  session:close()
+end)
+
+test("maxout selects the maximum of each channel group", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 4 }, "maxout_in")
+  local output = tfa.layers.maxout(graph, input, 2, { name = "maxout" })
+  local session = tf.Session.new(graph)
+  local tensor = session:run({ [input] = { {
+    { 1, 2, 3, 4 },
+    { 5, 6, 7, 8 },
+  } } }, { output })[1]
+  assert_eq(table.concat(tensor:shape(), ","), "1,2,2")
+  local values = tensor:totable()
+  near(values[1][1][1], 2, 0, "maxout (1,1)")
+  near(values[1][1][2], 4, 0, "maxout (1,2)")
+  near(values[1][2][1], 6, 0, "maxout (2,1)")
+  near(values[1][2][2], 8, 0, "maxout (2,2)")
+  session:close()
+end)
+
+test("maxout supports a non-last axis and rejects indivisible groups",
+    function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 4, 2 }, "maxout_axis_in")
+  local output = tfa.layers.Maxout(graph, input, 2,
+    { axis = 1, input_shape = { 2, 4, 2 }, name = "maxout_axis" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = {
+    { { 1, 10 }, { 2, 20 }, { 3, 30 }, { 4, 40 } },
+    { { 5, 50 }, { 6, 60 }, { 7, 70 }, { 8, 80 } },
+  } }, { output })[1]:totable()
+  near(values[1][1][1], 2, 0, "maxout axis batch0 group0 channel0")
+  near(values[1][1][2], 20, 0, "maxout axis batch0 group0 channel1")
+  near(values[1][2][1], 4, 0, "maxout axis batch0 group1 channel0")
+  near(values[1][2][2], 40, 0, "maxout axis batch0 group1 channel1")
+  near(values[2][1][1], 6, 0, "maxout axis batch1 group0 channel0")
+  near(values[2][2][2], 80, 0, "maxout axis batch1 group1 channel1")
+  local ok = pcall(tfa.layers.maxout, graph, input, 3,
+    { axis = 0, input_shape = { 2, 4, 2 } })
+  assert_true(not ok, "maxout should reject indivisible axis sizes")
+  session:close()
+end)
+
+test("poisson returns the rate and applies inverse-CDF noise", function()
+  local graph = tf.Graph.new()
+  local log_rate = tf.placeholder(graph, "float32", { 2 }, "poisson_rate_in")
+  local noise = tf.placeholder(graph, "float32", { 2 }, "poisson_noise_in")
+  local deterministic = tfa.layers.poisson(graph, log_rate,
+    { name = "poisson_rate" })
+  local sampled = tfa.layers.poisson(graph, log_rate,
+    { noise = noise, name = "poisson_sample" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [log_rate] = { 0, math.log(2) },
+    [noise] = { 0.5, 0.5 },
+  }, { deterministic, sampled })
+  near(values[1]:totable()[1], 1, 1e-6, "poisson rate zero")
+  near(values[1]:totable()[2], 2, 1e-6, "poisson rate log two")
+  near(values[2]:totable()[1], -math.log(0.5), 1e-6, "poisson noise")
+  near(values[2]:totable()[2], -math.log(0.5), 1e-6, "poisson noise")
+  session:close()
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then

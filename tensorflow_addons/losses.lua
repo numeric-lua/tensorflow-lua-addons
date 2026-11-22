@@ -11,6 +11,39 @@ local function prepare(graph, labels, predictions, name, dtype)
   return labels, predictions
 end
 
+-- Log-cosh loss, matching tfa.losses.LogCosh.  The stable form
+-- |x| + softplus(-2|x|) - log(2) avoids overflow for large residuals.
+function Losses.log_cosh(graph, labels, predictions, options)
+  options = options or {}
+  local name = options.name or "log_cosh_loss"
+  local dtype = options.dtype or "float32"
+  labels = tf.cast(graph, labels, labels.dtype or "float32", dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or "float32",
+    dtype, name .. "/predictions")
+  local difference = tf.sub(graph, predictions, labels,
+    name .. "/difference", dtype)
+  local absolute = tf.abs(graph, difference, name .. "/absolute", dtype)
+  local scaled = tf.mul(graph, tf.constant(graph, -2,
+    name .. "/negative_two", dtype), absolute, name .. "/scaled", dtype)
+  local softplus = tf.nn.softplus(graph, scaled, name .. "/softplus", dtype)
+  local log_two = tf.constant(graph, math.log(2), name .. "/log_two", dtype)
+  local elementwise = tf.sub(graph, tf.add(graph, absolute, softplus,
+    name .. "/stable_sum", dtype), log_two, name .. "/elementwise", dtype)
+  local reduction = options.reduction or "sum_over_batch_size"
+  if reduction == "none" then return elementwise end
+  if reduction == "sum" then
+    return Ops.sum_all(graph, elementwise, name .. "/sum", dtype)
+  end
+  if reduction ~= "mean" and reduction ~= "sum_over_batch_size" then
+    error("log_cosh reduction must be 'none', 'mean', or 'sum'", 3)
+  end
+  return tf.reduce_mean(graph, Ops.flatten(graph, elementwise,
+    name .. "/flat", dtype), { 0 }, name .. "/mean", dtype)
+end
+
+Losses.LogCosh = Losses.log_cosh
+
 function Losses.focal(graph, labels, predictions, options)
   options = options or {}
   local name = options.name or "focal_loss"

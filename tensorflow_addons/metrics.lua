@@ -303,6 +303,18 @@ local function class_range(graph, count, name)
   return desc:finish()
 end
 
+local function identity_matrix(graph, count, name)
+  local indices = class_range(graph, count, name .. "/indices")
+  local row = tf.reshape(graph, indices, { -1, 1 }, name .. "/row", "int32")
+  local column = tf.reshape(graph, indices, { 1, -1 }, name .. "/column",
+    "int32")
+  local desc = graph:new_operation("Equal", name .. "/equal")
+  desc:add_input(row)
+  desc:add_input(column)
+  desc:set_type("T", "int32")
+  return tf.cast(graph, desc:finish(), "bool", "float32", name .. "/matrix")
+end
+
 local function kappa_weights(graph, count, scheme, name)
   local indices = class_range(graph, count, name .. "/indices")
   local row = tf.reshape(graph, indices, { -1, 1 }, name .. "/row", "int32")
@@ -376,6 +388,52 @@ local function multiclass_confusion(graph, predictions, labels, options, name)
   return tf.matmul(graph, label_transposed, pred_hot, name .. "/matrix",
     "float32"), count
 end
+
+-- Mean intersection-over-union, matching tfa.metrics.MeanIoU.  Classes whose
+-- union is zero are excluded from the mean; an all-empty batch returns zero.
+function Metrics.mean_iou(graph, predictions, labels, num_classes, options)
+  if type(num_classes) == "table" and options == nil then
+    options = num_classes
+    num_classes = options.num_classes
+  end
+  options = options or {}
+  local name = options.name or "mean_iou"
+  if num_classes ~= nil then
+    validate_num_classes(num_classes, name)
+    options.num_classes = num_classes
+  end
+  local pred_classes, pred_one_hot = tensor_classes(graph, predictions,
+    options, "predictions_one_hot", name .. "/predictions")
+  local label_classes, label_one_hot = tensor_classes(graph, labels, options,
+    "labels_one_hot", name .. "/labels")
+  local count = class_count(graph, predictions, labels, pred_one_hot,
+    label_one_hot, options, name .. "/classes")
+  local pred_hot = one_hot_classes(graph, pred_classes, count,
+    name .. "/predicted_one_hot")
+  local label_hot = one_hot_classes(graph, label_classes, count,
+    name .. "/labels_one_hot")
+  local confusion = tf.matmul(graph, transpose_2d(graph, label_hot,
+    name .. "/labels_transposed"), pred_hot, name .. "/matrix", "float32")
+  local diagonal = tf.reduce_sum(graph, tf.mul(graph, confusion,
+    identity_matrix(graph, count, name .. "/identity"),
+    name .. "/true_positive_tensor", "float32"), { 0 },
+    name .. "/true_positive", "float32", false)
+  local actual = tf.reduce_sum(graph, confusion, { 1 }, name .. "/actual",
+    "float32", false)
+  local predicted = tf.reduce_sum(graph, confusion, { 0 },
+    name .. "/predicted", "float32", false)
+  local union = tf.sub(graph, tf.add(graph, actual, predicted,
+    name .. "/union_sum", "float32"), diagonal, name .. "/union", "float32")
+  local valid = Ops.greater(graph, union, tf.constant(graph, 0,
+    name .. "/zero", "float32"), name .. "/valid", "float32")
+  local valid_count = Ops.sum_all(graph, tf.cast(graph, valid, "bool",
+    "float32", name .. "/valid_float"), name .. "/valid_count", "float32")
+  local iou = Ops.clean_div(graph, diagonal, union, name .. "/iou", "float32")
+  return Ops.clean_div(graph, Ops.sum_all(graph, iou, name .. "/iou_sum",
+    "float32"), valid_count, name, "float32")
+end
+
+Metrics.MeanIoU = Metrics.mean_iou
 
 function Metrics.cohen_kappa(graph, predictions, labels, options)
   if not is_graph_tensor(labels) then

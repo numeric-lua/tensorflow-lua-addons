@@ -62,6 +62,24 @@ local function equal(graph, a, b, name, dtype)
   return desc:finish()
 end
 
+local function not_equal(graph, a, b, name, dtype)
+  local desc = graph:new_operation("NotEqual", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+local function graph_select(graph, condition, then_value, else_value, name,
+    dtype)
+  local desc = graph:new_operation("Select", name)
+  desc:add_input(condition)
+  desc:add_input(then_value)
+  desc:add_input(else_value)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
 local function is_graph(value)
   return type(value) == "table" and type(value.new_operation) == "function"
 end
@@ -256,6 +274,122 @@ function Optimizers.LAMB(graph, loss, variables, options)
   return targets, gradients, {
     initializers = initializers, variables = state_variables,
     beta1_power = beta1_power, beta2_power = beta2_power,
+  }
+end
+
+-- Lazy Adam.  Unlike Adam, moment accumulators and variables are only updated
+-- for tensor elements that receive a non-zero gradient.  This mirrors the
+-- sparse-update savings of tfa.optimizers.LazyAdam while still accepting the
+-- dense gradients returned by the public tensorflow.lua gradients API.
+function Optimizers.LazyAdam(graph, loss, variables, options)
+  options = options or {}
+  if type(variables) ~= "table" or #variables == 0 then
+    error("LazyAdam expects a non-empty variable list", 3)
+  end
+  local learning_rate = options.learning_rate or options.lr or 0.001
+  local beta1 = options.beta1 or 0.9
+  local beta2 = options.beta2 or 0.999
+  local epsilon = options.epsilon or 1e-8
+  local weight_decay = options.weight_decay or options.weight_decay_rate or
+    options.wd or 0
+  local name = options.name or "LazyAdam"
+  local refs = {}
+  for index, variable in ipairs(variables) do
+    refs[index] = variable.ref or variable
+  end
+  local gradients = options.gradients or tf.gradients(graph, { loss }, refs)
+  local dtype = variables[1].dtype or "float32"
+  local lr = tf.constant(graph, learning_rate, name .. "/learning_rate", dtype)
+  local b1 = tf.constant(graph, beta1, name .. "/beta1", dtype)
+  local b2 = tf.constant(graph, beta2, name .. "/beta2", dtype)
+  local eps = tf.constant(graph, epsilon, name .. "/epsilon", dtype)
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local weight_decay_op = tf.constant(graph, weight_decay,
+    name .. "/weight_decay", dtype)
+  local beta1_power = Train.variable(graph, beta1, name .. "/beta1_power",
+    { dtype = dtype })
+  local beta2_power = Train.variable(graph, beta2, name .. "/beta2_power",
+    { dtype = dtype })
+  local initializers = { beta1_power.initializer, beta2_power.initializer }
+  local state_variables = { beta1_power, beta2_power }
+  local targets = {}
+
+  for index, variable in ipairs(variables) do
+    local ref = variable.ref or variable
+    local var_dtype = variable.dtype or dtype
+    local shape = variable.shape or { }
+    local m = Train.variable(graph, zeros(shape), name .. "/m_" .. index,
+      { dtype = var_dtype })
+    local v = Train.variable(graph, zeros(shape), name .. "/v_" .. index,
+      { dtype = var_dtype })
+    initializers[#initializers + 1] = m.initializer
+    initializers[#initializers + 1] = v.initializer
+    state_variables[#state_variables + 1] = m
+    state_variables[#state_variables + 1] = v
+
+    local gradient = gradients[index]
+    local mask = not_equal(graph, gradient, zero,
+      name .. "/gradient_mask_" .. index, var_dtype)
+    local m_candidate = tf.add(graph, tf.mul(graph, m.read, b1,
+      name .. "/m_decay_" .. index, var_dtype), tf.mul(graph, gradient,
+      tf.sub(graph, one, b1, name .. "/one_minus_b1_" .. index, var_dtype),
+      name .. "/m_gradient_" .. index, var_dtype), name .. "/m_candidate_" ..
+      index, var_dtype)
+    local v_candidate = tf.add(graph, tf.mul(graph, v.read, b2,
+      name .. "/v_decay_" .. index, var_dtype), tf.mul(graph,
+      tf.square(graph, gradient, name .. "/grad_square_" .. index, var_dtype),
+      tf.sub(graph, one, b2, name .. "/one_minus_b2_" .. index, var_dtype),
+      name .. "/v_gradient_" .. index, var_dtype), name .. "/v_candidate_" ..
+      index, var_dtype)
+    local m_next = graph_select(graph, mask, m_candidate, m.read,
+      name .. "/m_lazy_" .. index, var_dtype)
+    local v_next = graph_select(graph, mask, v_candidate, v.read,
+      name .. "/v_lazy_" .. index, var_dtype)
+    local m_assign = assign(graph, m.ref, m_next, name .. "/m_assign_" .. index,
+      var_dtype)
+    local v_assign = assign(graph, v.ref, v_next, name .. "/v_assign_" .. index,
+      var_dtype)
+
+    local one_minus_b1_power = tf.sub(graph, one, beta1_power.read,
+      name .. "/one_minus_b1_power_" .. index, var_dtype)
+    local one_minus_b2_power = tf.sub(graph, one, beta2_power.read,
+      name .. "/one_minus_b2_power_" .. index, var_dtype)
+    local m_hat = tf.div(graph, m_next, one_minus_b1_power,
+      name .. "/m_hat_" .. index, var_dtype)
+    local v_hat = tf.div(graph, v_next, one_minus_b2_power,
+      name .. "/v_hat_" .. index, var_dtype)
+    local update = tf.div(graph, m_hat, tf.add(graph,
+      tf.sqrt(graph, v_hat, name .. "/v_sqrt_" .. index, var_dtype), eps,
+      name .. "/v_epsilon_" .. index, var_dtype), name .. "/update_" ..
+      index, var_dtype)
+    local decay = tf.mul(graph, variable.read, weight_decay_op,
+      name .. "/weight_decay_" .. index, var_dtype)
+    local delta = tf.mul(graph, lr, tf.add(graph, update, decay,
+      name .. "/update_and_decay_" .. index, var_dtype),
+      name .. "/delta_" .. index, var_dtype)
+    local candidate = tf.sub(graph, variable.read, delta,
+      name .. "/candidate_" .. index, var_dtype)
+    local next_weight = graph_select(graph, mask, candidate, variable.read,
+      name .. "/next_weight_" .. index, var_dtype)
+    targets[#targets + 1] = assign(graph, ref, next_weight,
+      name .. "/weight_assign_" .. index, var_dtype, { m_assign, v_assign })
+  end
+
+  if #targets > 0 then
+    local next_b1 = tf.mul(graph, beta1_power.read, b1,
+      name .. "/next_beta1", dtype)
+    local next_b2 = tf.mul(graph, beta2_power.read, b2,
+      name .. "/next_beta2", dtype)
+    targets[#targets + 1] = assign(graph, beta1_power.ref, next_b1,
+      name .. "/assign_beta1", dtype, targets)
+    targets[#targets + 1] = assign(graph, beta2_power.ref, next_b2,
+      name .. "/assign_beta2", dtype, targets)
+  end
+
+  return targets, gradients, {
+    initializers = initializers, variables = state_variables,
+    beta1_power = beta1_power, beta2_power = beta2_power, lazy = true,
   }
 end
 

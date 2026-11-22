@@ -8,9 +8,9 @@ source = {
 description = {
   summary = "TensorFlow Addons for LuaJIT",
   detailed = [[
-    Activations, losses, metrics, normalization layers, LAMB, NovoGrad,
-    Lookahead, and callbacks built on tensorflow-lua. Requires a local
-    libtensorflow installation.
+    Activations, losses, metrics, normalization and maxout layers, LAMB,
+    NovoGrad, LazyAdam, Lookahead, image helpers, and callbacks built on
+    tensorflow-lua. Requires a local libtensorflow installation.
   ]],
   homepage = "https://github.com/numeric-lua/tensorflow-lua-addons",
   license = "BSD-3-Clause",
@@ -31,6 +31,7 @@ build = {
     ["tensorflow_addons.layers"] = "tensorflow_addons/layers.lua",
     ["tensorflow_addons.callbacks"] = "tensorflow_addons/callbacks.lua",
     ["tensorflow_addons.optimizers"] = "tensorflow_addons/optimizers.lua",
+    ["tensorflow_addons.image"] = "tensorflow_addons/image.lua",
     ["tensorflow_addons.ops"] = "tensorflow_addons/ops.lua",
   },
 }

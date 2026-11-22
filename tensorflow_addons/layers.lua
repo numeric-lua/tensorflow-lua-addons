@@ -15,6 +15,88 @@ local function zeros(count)
   return values
 end
 
+local function pack_int32(graph, values, name)
+  local desc = graph:new_operation("Pack", name)
+  desc:add_inputs(values)
+  desc:set_type("T", "int32")
+  desc:set_int("axis", 0)
+  desc:set_int("N", #values)
+  return desc:finish()
+end
+
+local function last_dimension(graph, tensor, name, dtype)
+  local shape = tf.shape(graph, tensor, name .. "/shape", dtype)
+  local begin = tf.constant(graph, { -1 }, name .. "/begin", "int32")
+  local limit = tf.constant(graph, { 2147483647 }, name .. "/end", "int32")
+  local stride = tf.constant(graph, { 1 }, name .. "/stride", "int32")
+  local desc = graph:new_operation("StridedSlice", name .. "/slice")
+  desc:add_input(shape)
+  desc:add_input(begin)
+  desc:add_input(limit)
+  desc:add_input(stride)
+  desc:set_type("T", "int32")
+  desc:set_type("Index", "int32")
+  desc:set_int("begin_mask", 0)
+  desc:set_int("end_mask", 0)
+  desc:set_int("ellipsis_mask", 0)
+  desc:set_int("new_axis_mask", 0)
+  desc:set_int("shrink_axis_mask", 0)
+  return tf.reshape(graph, desc:finish(), {}, name .. "/scalar", "int32")
+end
+
+local function shape_prefix(graph, shape, name)
+  local begin = tf.constant(graph, { 0 }, name .. "/begin", "int32")
+  local limit = tf.constant(graph, { -1 }, name .. "/end", "int32")
+  local stride = tf.constant(graph, { 1 }, name .. "/stride", "int32")
+  local desc = graph:new_operation("StridedSlice", name .. "/slice")
+  desc:add_input(shape)
+  desc:add_input(begin)
+  desc:add_input(limit)
+  desc:add_input(stride)
+  desc:set_type("T", "int32")
+  desc:set_type("Index", "int32")
+  desc:set_int("begin_mask", 0)
+  desc:set_int("end_mask", 0)
+  desc:set_int("ellipsis_mask", 0)
+  desc:set_int("new_axis_mask", 0)
+  desc:set_int("shrink_axis_mask", 0)
+  return desc:finish()
+end
+
+local function floor_div_int32(graph, a, b, name)
+  local desc = graph:new_operation("FloorDiv", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", "int32")
+  return desc:finish()
+end
+
+local function reshape_dynamic(graph, input, shape, name, dtype)
+  local desc = graph:new_operation("Reshape", name)
+  desc:add_input(input)
+  desc:add_input(shape)
+  desc:set_type("T", dtype)
+  desc:set_type("Tshape", "int32")
+  return desc:finish()
+end
+
+local function maxout_last(graph, input, num_units, name, dtype)
+  local shape = tf.shape(graph, input, name .. "/shape", dtype)
+  local channels = last_dimension(graph, input, name .. "/channels", dtype)
+  local units = tf.constant(graph, num_units, name .. "/units", "int32")
+  local per_group = floor_div_int32(graph, channels, units,
+    name .. "/per_group")
+  local tail = pack_int32(graph, { units, per_group },
+    name .. "/tail_shape")
+  local grouped_shape = tf.concat(graph, {
+    shape_prefix(graph, shape, name .. "/prefix"),
+    tail,
+  }, 0, name .. "/grouped_shape", "int32")
+  local grouped = reshape_dynamic(graph, input, grouped_shape,
+    name .. "/grouped", dtype)
+  return tf.reduce_max(graph, grouped, { -1 }, name .. "/output", dtype, false)
+end
+
 local function normalize(graph, input, axes, name, dtype, options)
   local epsilon = options.epsilon or 1e-5
   local mean = tf.reduce_mean(graph, input, axes, name .. "/mean", dtype, true)
@@ -82,6 +164,10 @@ function Layers.instance_normalization(graph, input, options)
     error("instance_normalization requires options.input_shape", 3)
   end
   local channels = shape[#shape]
+  return Layers.group_normalization(graph, input, channels,
+    { input_shape = shape, epsilon = options.epsilon,
+      dtype = options.dtype, name = options.name or "instance_normalization" })
+end
 
 -- Poisson layer.  Sampling is deterministic unless the caller supplies
 -- options.noise; with noise it applies the standard inverse-CDF transform.
@@ -89,7 +175,6 @@ function Layers.poisson(graph, log_rate, options)
   options = options or {}
   local name = options.name or "poisson"
   local dtype = options.dtype or "float32"
-  local tf = require("tensorflow")
   local rate = tf.exp(graph, log_rate, name .. "/rate", dtype)
   if options.noise == nil then return rate end
   local transformed = tf.sub(graph, tf.constant(graph, 1, name .. "/one", dtype),
@@ -113,12 +198,6 @@ function Layers.quantization(graph, input, options)
   desc:set_int("num_bits", options.num_bits or 8)
   desc:set_bool("narrow_range", options.narrow_range == true)
   return desc:finish()
-end
-
-
-return Layers.group_normalization(graph, input, channels,
-    { input_shape = shape, epsilon = options.epsilon,
-      dtype = options.dtype, name = options.name or "instance_normalization" })
 end
 
 function Layers.layer_normalization(graph, input, options)
@@ -260,37 +339,52 @@ return {
 }
 end
 
--- Poisson layer.  Sampling is deterministic unless the caller supplies
--- options.noise; with noise it applies the standard inverse-CDF transform.
-function Layers.poisson(graph, log_rate, options)
+-- Maxout layer.  The selected axis is moved to the end, its channels are
+-- grouped into num_units groups, and the maximum of each group is returned.
+function Layers.maxout(graph, input, num_units, options)
   options = options or {}
-  local name = options.name or "poisson"
-  local dtype = options.dtype or "float32"
-  local tf = require("tensorflow")
-  local rate = tf.exp(graph, log_rate, name .. "/rate", dtype)
-  if options.noise == nil then return rate end
-  local transformed = tf.sub(graph, tf.constant(graph, 1, name .. "/one", dtype),
-    options.noise, name .. "/complement", dtype)
-  return tf.mul(graph, tf.constant(graph, -1, name .. "/negative", dtype),
-    tf.log(graph, tf.maximum(graph, transformed,
-      tf.constant(graph, 1e-7, name .. "/epsilon", dtype), name .. "/safe",
-      dtype), name .. "/log", dtype), name, dtype)
+  local name = options.name or "maxout"
+  local dtype = options.dtype or input.dtype or "float32"
+  if type(num_units) ~= "number" or num_units % 1 ~= 0 or num_units < 1 then
+    error("maxout requires num_units to be a positive integer", 3)
+  end
+  local axis = options.axis or -1
+  local shape = options.input_shape
+  local rank = type(shape) == "table" and #shape or nil
+  local inverse
+  if axis ~= -1 and rank == nil then
+    error("maxout requires options.input_shape when axis is not -1", 3)
+  end
+  if rank ~= nil then
+    if type(axis) ~= "number" or axis % 1 ~= 0 then
+      error("maxout axis must be an integer", 3)
+    end
+    if axis < 0 then axis = axis + rank end
+    if axis < 0 or axis >= rank then
+      error("maxout axis is out of range", 3)
+    end
+    local channels = shape[axis + 1]
+    if channels % num_units ~= 0 then
+      error("maxout num_units must divide the selected axis size", 3)
+    end
+    if axis ~= rank - 1 then
+      local perm = {}
+      inverse = {}
+      for index = 0, rank - 1 do
+        if index ~= axis then perm[#perm + 1] = index end
+      end
+      perm[#perm + 1] = axis
+      for index = 1, rank do inverse[perm[index] + 1] = index - 1 end
+      input = tf.transpose(graph, input, perm, name .. "/transpose", dtype)
+    end
+  end
+  local output = maxout_last(graph, input, num_units, name, dtype)
+  if inverse ~= nil then
+    output = tf.transpose(graph, output, inverse, name .. "/untranspose", dtype)
+  end
+  return output
 end
 
-function Layers.quantization(graph, input, options)
-  options = options or {}
-  local name = options.name or "quantization"
-  local dtype = options.dtype or "float32"
-  local min_value = options.min_value or -6
-  local max_value = options.max_value or 6
-  local desc = graph:new_operation("FakeQuantWithMinMaxVars", name)
-  desc:add_input(input)
-  desc:add_input(tf.constant(graph, min_value, name .. "/min", dtype))
-  desc:add_input(tf.constant(graph, max_value, name .. "/max", dtype))
-  desc:set_int("num_bits", options.num_bits or 8)
-  desc:set_bool("narrow_range", options.narrow_range == true)
-  return desc:finish()
-end
-
+Layers.Maxout = Layers.maxout
 
 return Layers
