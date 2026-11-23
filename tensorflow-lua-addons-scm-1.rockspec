@@ -8,9 +8,10 @@ source = {
 description = {
   summary = "TensorFlow Addons for LuaJIT",
   detailed = [[
-    Activations, losses, metrics, normalization and maxout layers, stochastic
-    depth, LAMB, NovoGrad, LazyAdam, Lookahead, image helpers, and callbacks
-    built on tensorflow-lua. Requires a local libtensorflow installation.
+    Activations, N-pairs and semi-hard triplet losses, Hamming metrics,
+    filter-response and other normalization layers, stochastic depth, LAMB,
+    NovoGrad, LazyAdam, Lookahead, image filters, and callbacks built on
+    tensorflow-lua. Requires a local libtensorflow installation.
   ]],
   homepage = "https://github.com/numeric-lua/tensorflow-lua-addons",
   license = "BSD-3-Clause",
