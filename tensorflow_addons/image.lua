@@ -364,4 +364,50 @@ function Image.median_filter2d(graph, input, options)
   return from_4d_image(graph, median, rank, name, source_dtype)
 end
 
+-- Mean filtering, matching tfa.image.mean_filter2d's filter_shape, padding, and
+-- constant_values options.  Supports rank-2, rank-3, and rank-4 images.
+function Image.mean_filter2d(graph, input, options)
+  options = options or {}
+  local name = options.name or "mean_filter2d"
+  local source_dtype = options.dtype or input.dtype or "float32"
+  local dtype = compute_dtype(source_dtype)
+  local rank = image_rank(name, options)
+  local padding = string.upper(options.padding or "REFLECT")
+  if padding ~= "REFLECT" and padding ~= "SYMMETRIC" and
+      padding ~= "CONSTANT" then
+    error(name .. " padding must be REFLECT, SYMMETRIC, or CONSTANT", 3)
+  end
+  local height, width = validate_filter_shape(options.filter_shape, name, true)
+  local image = input
+  if source_dtype ~= dtype then
+    image = tf.cast(graph, input, source_dtype, dtype, name .. "/compute_input")
+  end
+  image = to_4d_image(graph, image, rank, name .. "/image", dtype)
+  local pad_top = math.floor((height - 1) / 2)
+  local pad_left = math.floor((width - 1) / 2)
+  image = pad_image(graph, image, {
+    { 0, 0 },
+    { pad_top, height - 1 - pad_top },
+    { pad_left, width - 1 - pad_left },
+    { 0, 0 },
+  }, padding, options.constant_values or 0, name .. "/padded", dtype)
+  local area = height * width
+  local kernel_values = {}
+  for row = 1, height do
+    kernel_values[row] = {}
+    for column = 1, width do
+      kernel_values[row][column] = { { 1 / area } }
+    end
+  end
+  local channels = last_dimension(graph, image, name .. "/channels", dtype)
+  local kernel = tf.constant(graph, kernel_values, name .. "/kernel", dtype)
+  kernel = tile_kernel(graph, kernel, channels, name .. "/tiled_kernel", dtype)
+  local output = depthwise_conv(graph, image, kernel, "VALID",
+    name .. "/conv", dtype)
+  if source_dtype ~= dtype then
+    output = tf.cast(graph, output, dtype, source_dtype, name .. "/output")
+  end
+  return from_4d_image(graph, output, rank, name, source_dtype)
+end
+
 return Image

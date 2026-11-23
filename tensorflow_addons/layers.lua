@@ -15,6 +15,16 @@ local function zeros(count)
   return values
 end
 
+local function filled(shape, value, depth)
+  depth = depth or 1
+  if depth > #shape then return value end
+  local result = {}
+  for index = 1, shape[depth] do
+    result[index] = filled(shape, value, depth + 1)
+  end
+  return result
+end
+
 local function pack_int32(graph, values, name)
   local desc = graph:new_operation("Pack", name)
   desc:add_inputs(values)
@@ -446,5 +456,86 @@ function Layers.stochastic_depth(graph, shortcut, residual, options)
 end
 
 Layers.StochasticDepth = Layers.stochastic_depth
+
+-- Filter response normalization, matching tfa.layers.FilterResponseNormalization.
+-- The layer normalizes each channel over the spatial axes [1, 2] of an NHWC
+-- tensor and applies per-channel scale and offset.  options.learned_epsilon
+-- adds the trainable positive epsilon term from TensorFlow Addons.
+function Layers.filter_response_normalization(graph, input, options)
+  options = options or {}
+  local shape = options.input_shape
+  if type(shape) ~= "table" or #shape ~= 4 then
+    error("filter_response_normalization requires a rank-4 input_shape", 3)
+  end
+  local dtype = options.dtype or input.dtype or "float32"
+  local prefix = options.name or "filter_response_normalization"
+  local axis = options.axis or { 1, 2 }
+  if type(axis) ~= "table" or #axis ~= 2 then
+    error("filter_response_normalization axis must be { 1, 2 }", 3)
+  end
+  local resolved = {}
+  for index = 1, #axis do
+    local value = axis[index]
+    if type(value) ~= "number" or value % 1 ~= 0 then
+      error("filter_response_normalization axis entries must be integers", 3)
+    end
+    if value < 0 then value = value + #shape end
+    resolved[index] = value
+  end
+  if resolved[1] ~= 1 or resolved[2] ~= 2 then
+    error("filter_response_normalization operates on spatial axes { 1, 2 }", 3)
+  end
+  local epsilon = options.epsilon
+  if epsilon == nil then epsilon = 1e-6 end
+  if type(epsilon) ~= "number" or epsilon ~= epsilon or
+      epsilon == math.huge or epsilon == -math.huge then
+    error("filter_response_normalization epsilon must be a finite number", 3)
+  end
+  local channels = shape[4]
+  local gamma = tf.variable(graph, filled({ 1, 1, 1, channels }, 1),
+    prefix .. "/gamma", { dtype = dtype })
+  local beta = tf.variable(graph, filled({ 1, 1, 1, channels }, 0),
+    prefix .. "/beta", { dtype = dtype })
+  local variables = { gamma, beta }
+  local initializers = { gamma.initializer, beta.initializer }
+  local squared = tf.square(graph, input, prefix .. "/squared", dtype)
+  local nu2 = tf.reduce_mean(graph, squared, { 1, 2 }, prefix .. "/nu2", dtype,
+    true)
+  local epsilon_op = tf.constant(graph, math.abs(epsilon),
+    prefix .. "/epsilon", dtype)
+  local epsilon_total = epsilon_op
+  local learned_epsilon
+  if options.learned_epsilon == true then
+    learned_epsilon = tf.variable(graph, { 1e-4 },
+      prefix .. "/learned_epsilon", { dtype = dtype })
+    local absolute = tf.abs(graph, learned_epsilon.read,
+      prefix .. "/learned_epsilon_abs", dtype)
+    epsilon_total = tf.add(graph, epsilon_op, absolute,
+      prefix .. "/epsilon_total", dtype)
+    variables[#variables + 1] = learned_epsilon
+    initializers[#initializers + 1] = learned_epsilon.initializer
+  end
+  local denominator_base = tf.add(graph, nu2, epsilon_total,
+    prefix .. "/denominator_base", dtype)
+  local denominator = tf.sqrt(graph, denominator_base,
+    prefix .. "/denominator", dtype)
+  local normalized = tf.div(graph, input, denominator,
+    prefix .. "/normalized", dtype)
+  local scaled = tf.mul(graph, gamma.read, normalized, prefix .. "/scaled",
+    dtype)
+  local output = tf.add(graph, scaled, beta.read, prefix .. "/output", dtype)
+  return {
+    output = output,
+    gamma = gamma,
+    beta = beta,
+    learned_epsilon = learned_epsilon,
+    variables = variables,
+    initializers = initializers,
+    axis = resolved,
+    epsilon = epsilon,
+  }
+end
+
+Layers.FilterResponseNormalization = Layers.filter_response_normalization
 
 return Layers

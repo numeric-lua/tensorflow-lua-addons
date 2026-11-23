@@ -1118,6 +1118,222 @@ test("stochastic depth honors survival probability and training", function()
   session:close()
 end)
 
+test("npairs loss matches the normalized-adjacency softmax formula", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "int32", { 4 }, "np_labels")
+  local similarity = tf.placeholder(graph, "float32", { 4, 4 },
+    "np_similarity")
+  local multilabel = tf.placeholder(graph, "float32", { 4, 2 },
+    "np_multilabel")
+  local loss = tfa.losses.npairs_loss(graph, labels, similarity)
+  local multilabel_loss = tfa.losses.npairs_multilabel_loss(graph, multilabel,
+    similarity, { name = "npairs_multilabel" })
+  local session = tf.Session.new(graph)
+  local matrix = {
+    { 2, 1, 0, 0 },
+    { 1, 2, 0, 0 },
+    { 0, 0, 2, 1 },
+    { 0, 0, 1, 2 },
+  }
+  local function row_loss(row, first, second)
+    local maximum = row[1]
+    for index = 2, 4 do maximum = math.max(maximum, row[index]) end
+    local total = 0
+    for index = 1, 4 do total = total + math.exp(row[index] - maximum) end
+    local log_total = math.log(total)
+    local value = 0
+    for _, index in ipairs({ first, second }) do
+      value = value - 0.5 * (row[index] - maximum - log_total)
+    end
+    return value
+  end
+  local expected = (row_loss(matrix[1], 1, 2) + row_loss(matrix[2], 1, 2) +
+    row_loss(matrix[3], 3, 4) + row_loss(matrix[4], 3, 4)) / 4
+  local values = session:run({
+    [labels] = { 0, 0, 1, 1 },
+    [multilabel] = { { 1, 0 }, { 1, 0 }, { 0, 1 }, { 0, 1 } },
+    [similarity] = matrix,
+  }, { loss, multilabel_loss })
+  near(values[1]:totable(), expected, 1e-6, "npairs loss")
+  near(values[2]:totable(), expected, 1e-6, "npairs multilabel loss")
+  assert_true(tfa.losses.NpairsLoss == tfa.losses.npairs_loss)
+  assert_true(tfa.losses.NpairsMultilabelLoss ==
+    tfa.losses.npairs_multilabel_loss)
+  session:close()
+end)
+
+test("triplet semihard loss matches TensorFlow Addons examples", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "int32", { 2 }, "tsh_labels")
+  local embeddings = tf.placeholder(graph, "float32", { 2, 2 },
+    "tsh_embeddings")
+  local l2 = tfa.losses.triplet_semihard_loss(graph, labels, embeddings,
+    { margin = 1, distance_metric = "L2", name = "tsh_l2" })
+  local squared = tfa.losses.triplet_semihard_loss(graph, labels, embeddings,
+    { margin = 1, distance_metric = "squared-L2", name = "tsh_squared" })
+  local angular = tfa.losses.triplet_semihard_loss(graph, labels, embeddings,
+    { margin = 1, distance_metric = "angular", name = "tsh_angular" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 0, 0 },
+    [embeddings] = { { 0, 1 }, { 1, 0 } },
+  }, { l2, squared, angular })
+  near(values[1]:totable(), 1 + math.sqrt(2), 1e-6, "semihard L2")
+  near(values[2]:totable(), 3, 1e-6, "semihard squared L2")
+  near(values[3]:totable(), 2, 1e-6, "semihard angular")
+  assert_true(tfa.losses.TripletSemiHardLoss ==
+    tfa.losses.triplet_semihard_loss)
+  session:close()
+end)
+
+test("triplet semihard mines the closest larger negative", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "int32", { 6 }, "tsh_mine_labels")
+  local embeddings = tf.placeholder(graph, "float32", { 6, 1 },
+    "tsh_mine_embeddings")
+  local l2 = tfa.losses.triplet_semihard_loss(graph, labels, embeddings,
+    { margin = 1, distance_metric = "L2", name = "tsh_mine_l2" })
+  local squared = tfa.losses.triplet_semihard_loss(graph, labels, embeddings,
+    { margin = 1, distance_metric = "squared-L2", name = "tsh_mine_squared" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 0, 0, 1, 1, 2, 2 },
+    [embeddings] = { { 0 }, { 1 }, { 2 }, { 3 }, { 4 }, { 8 } },
+  }, { l2, squared })
+  near(values[1]:totable(), 1 / 6, 1e-6, "semihard mined L2")
+  near(values[2]:totable(), 1 / 6, 1e-6, "semihard mined squared L2")
+  session:close()
+end)
+
+test("filter response normalization normalizes spatial responses", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 2 }, "frn_input")
+  local layer = tfa.layers.filter_response_normalization(graph, input,
+    { input_shape = { 1, 2, 2, 2 }, name = "frn" })
+  local learned = tfa.layers.filter_response_normalization(graph, input,
+    { input_shape = { 1, 2, 2, 2 }, learned_epsilon = true,
+      name = "frn_learned" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(layer.initializers) })
+  session:run({}, {}, { unpack(learned.initializers) })
+  local values = session:run({ [input] = { {
+    { { 1, 2 }, { 2, 2 } },
+    { { 3, 2 }, { 4, 2 } },
+  } } }, { layer.output, learned.output })
+  local output = values[1]:totable()
+  assert_eq(table.concat(values[1]:shape(), ","), "1,2,2,2")
+  local first_denominator = math.sqrt(7.5 + 1e-6)
+  near(output[1][1][1][1], 1 / first_denominator, 1e-6, "frn value 1")
+  near(output[1][1][2][1], 2 / first_denominator, 1e-6, "frn value 2")
+  near(output[1][2][1][1], 3 / first_denominator, 1e-6, "frn value 3")
+  near(output[1][2][2][1], 4 / first_denominator, 1e-6, "frn value 4")
+  local second_denominator = math.sqrt(4 + 1e-6)
+  near(output[1][1][1][2], 2 / second_denominator, 1e-6, "frn channel two")
+  assert_true(values[2]:totable()[1][1][1][1] ==
+    values[2]:totable()[1][1][1][1], "learned epsilon produced NaN")
+  assert_true(tfa.layers.FilterResponseNormalization ==
+    tfa.layers.filter_response_normalization)
+  session:close()
+end)
+
+test("hamming loss matches the multiclass and multilabel examples", function()
+  local graph = tf.Graph.new()
+  local multiclass_labels = tf.placeholder(graph, "float32", { 4, 4 },
+    "hamming_mc_labels")
+  local multiclass_predictions = tf.placeholder(graph, "float32", { 4, 4 },
+    "hamming_mc_predictions")
+  local multilabel_labels = tf.placeholder(graph, "int32", { 3, 4 },
+    "hamming_ml_labels")
+  local multilabel_predictions = tf.placeholder(graph, "float32", { 3, 4 },
+    "hamming_ml_predictions")
+  local actuals = tf.placeholder(graph, "int32", { 4 }, "hamming_actuals")
+  local guesses = tf.placeholder(graph, "int32", { 4 }, "hamming_guesses")
+  local multiclass = tfa.metrics.hamming_loss(graph, multiclass_predictions,
+    multiclass_labels, { mode = "multiclass", threshold = 0.6,
+      name = "hamming_mc" })
+  local multilabel = tfa.metrics.hamming_loss(graph, multilabel_predictions,
+    multilabel_labels, { mode = "multilabel", threshold = 0.8,
+      name = "hamming_ml" })
+  local distance = tfa.metrics.hamming_distance(graph, actuals, guesses,
+    { name = "hamming_distance" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [multiclass_labels] = {
+      { 1, 0, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 }, { 0, 1, 0, 0 },
+    },
+    [multiclass_predictions] = {
+      { 0.8, 0.1, 0.1, 0.0 }, { 0.2, 0.0, 0.8, 0.0 },
+      { 0.05, 0.05, 0.1, 0.8 }, { 1.0, 0.0, 0.0, 0.0 },
+    },
+    [multilabel_labels] = { { 1, 0, 1, 0 }, { 0, 1, 0, 1 },
+      { 0, 0, 0, 1 } },
+    [multilabel_predictions] = { { 0.82, 0.5, 0.90, 0 }, { 0, 1, 0.4, 0.98 },
+      { 0.89, 0.79, 0, 0.3 } },
+    [actuals] = { 1, 1, 0, 0 },
+    [guesses] = { 1, 0, 0, 0 },
+  }, { multiclass, multilabel, distance })
+  near(values[1]:totable(), 0.25, 1e-6, "multiclass hamming loss")
+  near(values[2]:totable(), 1 / 6, 1e-6, "multilabel hamming loss")
+  near(values[3]:totable(), 0.25, 1e-6, "hamming distance")
+  assert_true(tfa.metrics.HammingLoss == tfa.metrics.hamming_loss)
+  session:close()
+end)
+
+test("mean_filter2d preserves mass and supports even filters", function()
+  local graph = tf.Graph.new()
+  local impulse = tf.placeholder(graph, "float32", { 1, 3, 3, 1 },
+    "mean_impulse")
+  local ramp = tf.placeholder(graph, "float32", { 3, 3 }, "mean_ramp")
+  local flat = tf.placeholder(graph, "float32", { 3, 3, 2 }, "mean_flat")
+  local blurred = tfa.image.mean_filter2d(graph, impulse,
+    { filter_shape = { 3, 3 }, padding = "CONSTANT", constant_values = 0,
+      name = "mean_impulse_out" })
+  local even = tfa.image.mean_filter2d(graph, ramp,
+    { rank = 2, filter_shape = { 2, 2 }, padding = "CONSTANT",
+      constant_values = 0, name = "mean_even_out" })
+  local channel = tfa.image.mean_filter2d(graph, flat,
+    { rank = 3, filter_shape = { 3, 3 }, padding = "REFLECT",
+      name = "mean_channel_out" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [impulse] = { {
+      { { 0 }, { 0 }, { 0 } },
+      { { 0 }, { 1 }, { 0 } },
+      { { 0 }, { 0 }, { 0 } },
+    } },
+    [ramp] = { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } },
+    [flat] = {
+      { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+      { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+      { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+    },
+  }, { blurred, even, channel })
+  assert_eq(table.concat(values[1]:shape(), ","), "1,3,3,1")
+  local impulse_values = values[1]:totable()
+  local total = 0
+  for row = 1, 3 do
+    for column = 1, 3 do
+      near(impulse_values[1][row][column][1], 1 / 9, 1e-6,
+        "mean impulse value")
+      total = total + impulse_values[1][row][column][1]
+    end
+  end
+  near(total, 1, 1e-6, "mean impulse mass")
+  local even_values = values[2]:totable()
+  near(even_values[1][1], 3, 1e-6, "mean even top-left")
+  near(even_values[2][2], 7, 1e-6, "mean even center")
+  assert_eq(table.concat(values[3]:shape(), ","), "3,3,2")
+  for row = 1, 3 do
+    for column = 1, 3 do
+      for channel_index = 1, 2 do
+        near(values[3]:totable()[row][column][channel_index], 1, 1e-6,
+          "mean rank-3 constant image")
+      end
+    end
+  end
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -1142,6 +1358,23 @@ test("new parity options reject invalid values", function()
     { survival_probability = 2 })
   assert_true(not invalid_depth,
     "stochastic depth should reject survival_probability outside [0, 1]")
+  local embeddings = tf.placeholder(graph, "float32", { 1, 2 },
+    "newparity_embeddings")
+  local invalid_distance = pcall(tfa.losses.triplet_semihard_loss, graph,
+    labels, embeddings, { distance_metric = "cosine" })
+  assert_true(not invalid_distance,
+    "triplet semihard should reject an unknown distance metric")
+  local invalid_mode = pcall(tfa.metrics.hamming_loss, graph, predictions,
+    labels, { mode = "binary" })
+  assert_true(not invalid_mode, "hamming loss should reject an unknown mode")
+  local invalid_axis = pcall(tfa.layers.filter_response_normalization, graph,
+    input, { input_shape = { 1, 3, 3, 1 }, axis = { 1, 3 } })
+  assert_true(not invalid_axis,
+    "filter response normalization should reject non-spatial axes")
+  local invalid_mean_padding = pcall(tfa.image.mean_filter2d, graph, input,
+    { padding = "WRAP" })
+  assert_true(not invalid_mean_padding,
+    "mean_filter2d should reject unsupported padding")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

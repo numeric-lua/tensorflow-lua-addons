@@ -6,7 +6,7 @@ Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
 
-This is a 0.11.0 parity subset, not yet a complete TensorFlow Addons port.
+This is a 0.12.0 parity subset, not yet a complete TensorFlow Addons port.
 See the parity table below for what exists today.
 
 ## Install
@@ -41,6 +41,13 @@ local kappa = tfa.metrics.cohen_kappa(graph, confusion_matrix,
   { weights = "quadratic" })
 local mlcm = tfa.metrics.multilabel_confusion_matrix(graph, predictions, labels,
   3)
+local hamming = tfa.metrics.hamming_loss(graph, predictions, labels,
+  { mode = "multiclass", threshold = 0.5 })
+local npairs = tfa.losses.npairs_loss(graph, class_ids, similarity_matrix)
+local semihard = tfa.losses.triplet_semihard_loss(graph, class_ids, embeddings,
+  { margin = 1, distance_metric = "L2" })
+local frn = tfa.layers.filter_response_normalization(graph, input,
+  { input_shape = { 8, 8, 8, 16 } })
 local layer = tfa.layers.group_normalization(graph, input, 4,
   { input_shape = { 8, 8, 16 } })
 local maxout = tfa.layers.maxout(graph, input, 2)
@@ -49,6 +56,8 @@ local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
 local blurred = tfa.image.gaussian_filter2d(graph, image,
   { filter_shape = { 3, 3 }, sigma = 1 })
 local median = tfa.image.median_filter2d(graph, image,
+  { filter_shape = { 3, 3 }, padding = "REFLECT" })
+local mean = tfa.image.mean_filter2d(graph, image,
   { filter_shape = { 3, 3 }, padding = "REFLECT" })
 local lazy = tfa.optimizers.LazyAdam(graph, loss, { weight },
   { learning_rate = 0.001 })
@@ -75,6 +84,9 @@ local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
 - `log_cosh`
 - `pinball`
 - `sigmoid_focal_crossentropy`
+- `npairs_loss`
+- `npairs_multilabel_loss`
+- `triplet_semihard_loss`
 
 `giou` accepts boxes shaped `[..., 4]` in `[x1, y1, x2, y2]` order. It pairs
 the leading dimensions one-vs-one and returns the mean `1 - GIoU` loss. Use
@@ -100,8 +112,23 @@ the RetinaNet sigmoid focal loss with `options.alpha` (default `0.25`),
 function; `"mean"` and `"sum"` are also accepted).
 `tfa.losses.SigmoidFocalCrossEntropy` is an alias.
 
+`npairs_loss(graph, labels, similarity, options)` follows
+`tfa.losses.npairs_loss`: `labels` are 1-D class ids and `similarity` is the
+`[batch_size, batch_size]` matrix of pairwise logits. Rows with equal labels
+are normalized into a soft target distribution and the result is the mean
+softmax cross entropy. `npairs_multilabel_loss` accepts binary indicator rows
+instead, using the count of shared labels as the adjacency matrix.
+`tfa.losses.NpairsLoss` and `tfa.losses.NpairsMultilabelLoss` are aliases.
+
+`triplet_semihard_loss(graph, labels, embeddings, options)` implements
+`tfa.losses.triplet_semihard_loss` with in-batch semi-hard negative mining.
+`options.margin` defaults to `1` and `options.distance_metric` accepts `"L2"`
+(default), `"squared-L2"`, or `"angular"`. `tfa.losses.TripletSemiHardLoss` is
+an alias.
+
 Loss roadmap: `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`,
-`log_cosh`, `pinball`, and `sigmoid_focal_crossentropy` are available; further
+`log_cosh`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`,
+`npairs_multilabel_loss`, and `triplet_semihard_loss` are available; further
 specialized losses remain on the parity roadmap.
 
 ### Metrics
@@ -114,6 +141,8 @@ specialized losses remain on the parity roadmap.
 - `pearson_correlation`
 - `mean_iou`
 - `multilabel_confusion_matrix`
+- `hamming_loss`
+- `hamming_distance`
 - `multiclass_f1` (legacy macro-F1 helper)
 
 `f1_score(graph, predictions, labels, options)` keeps the binary threshold API
@@ -151,6 +180,13 @@ builds a `[num_classes, 2, 2]` tensor whose cells are
 set `options.threshold` (with optional `options.from_logits`) to threshold score
 rows first. `tfa.metrics.MultiLabelConfusionMatrix` is an alias.
 
+`hamming_loss(graph, predictions, labels, options)` follows
+`tfa.metrics.HammingLoss`. `options.mode` is `"multiclass"` (default) or
+`"multilabel"`. With `options.threshold` set, predictions above it are active;
+without a threshold the per-row maximum is selected and all-zero rows stay
+inactive. `hamming_distance(graph, actuals, predictions, options)` returns the
+fraction of differing element positions. `tfa.metrics.HammingLoss` is an alias.
+
 Classification metrics accept `options.name` for the graph namespace.
 
 ### Layers
@@ -160,6 +196,7 @@ Classification metrics accept `options.name` for the graph namespace.
 - `layer_normalization`
 - `weight_normalization`
 - `spectral_normalization`
+- `filter_response_normalization`
 - `maxout`
 - `stochastic_depth`
 
@@ -167,6 +204,14 @@ Classification metrics accept `options.name` for the graph namespace.
 
 - `poisson` (deterministic rate or noise inverse-CDF);
 - `quantization` (fake-quant).
+
+`filter_response_normalization(graph, input, options)` follows
+`tfa.layers.FilterResponseNormalization` for NHWC tensors: each channel is
+normalized by the root mean square over spatial axes `{ 1, 2 }`, then scaled
+and shifted by per-channel `gamma` and `beta`. It requires
+`options.input_shape`, accepts `options.epsilon` (default `1e-6`), and supports
+`options.learned_epsilon = true` for the trainable positive epsilon term.
+`tfa.layers.FilterResponseNormalization` is an alias.
 
 `maxout(graph, input, num_units, options)` groups the selected axis
 (`options.axis`, default last) into `num_units` groups and returns the group
@@ -223,6 +268,7 @@ the resolved `sync_period`/`slow_step_size`.
 - `resize_nearest`
 - `gaussian_filter2d`
 - `median_filter2d`
+- `mean_filter2d`
 
 `gaussian_filter2d(graph, image, options)` blurs rank-4 NHWC images (or rank-3
 HWC images with `options.rank = 3`) using an odd-sized Gaussian kernel. It
@@ -234,6 +280,12 @@ accepts `filter_shape` (default `{ 3, 3 }`), `sigma` (number or
 rank-3, or rank-4 images (`options.rank`, default `4`). It accepts `filter_shape`
 (default `{ 3, 3 }`, odd or even), `padding` (`"REFLECT"` by default, plus
 `"SYMMETRIC"` and `"CONSTANT"`), and `constant_values` for constant padding.
+
+`mean_filter2d(graph, image, options)` applies an average filter to rank-2,
+rank-3, or rank-4 images (`options.rank`, default `4`). It accepts `filter_shape`
+(default `{ 3, 3 }`, odd or even), `padding` (`"REFLECT"` by default, plus
+`"SYMMETRIC"` and `"CONSTANT"`), and `constant_values` for constant padding.
+Integer images are computed in float32 and cast back to their source type.
 
 ### Callbacks
 
@@ -247,12 +299,12 @@ rank-3, or rank-4 images (`options.rank`, default `4`). It accepts `filter_shape
 | Area | Implemented | Remaining TensorFlow Addons work |
 | --- | --- | --- |
 | Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink` | additional activation wrappers |
-| Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `pinball`, `sigmoid_focal_crossentropy` | hinge, KL divergence, N-pairs, semi-hard triplet |
-| Metrics | `f1_score`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `multiclass_f1` | additional detection/segmentation metrics |
-| Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral` | filter-response normalization and further normalization variants |
+| Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hinge, KL divergence, hard triplet |
+| Metrics | `f1_score`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `multiclass_f1` | AUC, precision/recall, and sensitivity/specificity metrics |
+| Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization` | Poincaré normalization and further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `stochastic_depth` | ESN, multi-head attention, noisy dense |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Lookahead`, `WeightDecay` | averaged/conditional-gradient and further optimizer wrappers |
-| Image | horizontal/vertical flips, brightness, nearest resize, `gaussian_filter2d`, `median_filter2d` | random color augmentation, warps/transforms, bilinear/area resize, Sobel filters |
+| Image | horizontal/vertical flips, brightness, nearest resize, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d` | random color augmentation, warps/transforms, bilinear/area resize, Sobel filters |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

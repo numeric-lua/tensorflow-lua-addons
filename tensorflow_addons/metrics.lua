@@ -71,9 +71,9 @@ local function tensor_classes(graph, tensor, options, one_hot_option, name)
   return cast_to_int64(graph, tensor, name .. "/cast"), false
 end
 
-local function last_dimension(graph, tensor, name)
+local function last_dimension(graph, tensor, name, dtype)
   local shape = tf.shape(graph, tensor, name .. "/input_shape",
-    tensor_dtype(tensor))
+    dtype or tensor_dtype(tensor))
   local begin = tf.constant(graph, { -1 }, name .. "/begin", "int32")
   local limit = tf.constant(graph, { 2147483647 }, name .. "/end", "int32")
   local stride = tf.constant(graph, { 1 }, name .. "/stride", "int32")
@@ -638,5 +638,99 @@ function Metrics.multiclass_f1(graph, predictions, labels, num_classes, options)
 
 end
 
+
+-- Hamming distance between two tensors, matching tfa.metrics.hamming_distance.
+-- The result is the fraction of element positions whose values differ.
+function Metrics.hamming_distance(graph, actuals, predictions, options)
+  options = options or {}
+  local name = options.name or "hamming_distance"
+  local dtype = predictions.dtype or actuals.dtype or "float32"
+  actuals = tf.cast(graph, actuals, actuals.dtype or dtype, dtype,
+    name .. "/actuals")
+  predictions = tf.cast(graph, predictions, predictions.dtype or dtype, dtype,
+    name .. "/predictions")
+  local mismatch = Ops.not_equal(graph, actuals, predictions,
+    name .. "/mismatch", dtype)
+  local values = tf.cast(graph, mismatch, "bool", "float32",
+    name .. "/mismatch_float")
+  return tf.reduce_mean(graph, Ops.flatten(graph, values, name .. "/flat",
+    "float32"), { 0 }, name, "float32")
+end
+
+-- Hamming loss, matching tfa.metrics.HammingLoss.  In "multiclass" mode each
+-- row is expected to contain one label and the loss is one minus the fraction
+-- of rows whose active positions match.  "multilabel" mode counts per-label
+-- mismatches.  A nil threshold selects the per-row maximum (with zero rows
+-- treated as inactive), like TensorFlow Addons.
+function Metrics.hamming_loss(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "hamming_loss"
+  local mode = options.mode or "multiclass"
+  if mode ~= "multiclass" and mode ~= "multilabel" then
+    error("hamming_loss mode must be 'multiclass' or 'multilabel'", 4)
+  end
+  local dtype = options.dtype or "float32"
+  local truth = tf.cast(graph, labels, labels.dtype or "int32", "int32",
+    name .. "/labels")
+  local scores = predictions
+  local score_dtype = predictions.dtype or dtype
+  local predicted
+  local threshold = options.threshold
+  if threshold == nil then
+    local maximum = tf.reduce_max(graph, scores, { 1 }, name .. "/maximum",
+      score_dtype, true)
+    local at_maximum = Ops.greater_equal(graph, scores, maximum,
+      name .. "/at_maximum", score_dtype)
+    local absolute = tf.abs(graph, scores, name .. "/absolute", score_dtype)
+    local epsilon = tf.constant(graph, 1e-12, name .. "/epsilon", score_dtype)
+    local nonzero = Ops.greater(graph, absolute, epsilon, name .. "/nonzero",
+      score_dtype)
+    predicted = Ops.logical_and(graph, at_maximum, nonzero,
+      name .. "/predicted")
+  else
+    if type(threshold) ~= "number" or threshold ~= threshold or
+        threshold == math.huge or threshold == -math.huge then
+      error("hamming_loss threshold must be a finite number", 4)
+    end
+    predicted = Ops.greater(graph, scores, tf.constant(graph, threshold,
+      name .. "/threshold", score_dtype), name .. "/predicted", score_dtype)
+  end
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  if mode == "multiclass" then
+    local zero = tf.constant(graph, 0, name .. "/zero_int", "int32")
+    local active = Ops.not_equal(graph, truth, zero, name .. "/active",
+      "int32")
+    local matched = Ops.logical_and(graph, active, predicted,
+      name .. "/matched")
+    local matched_float = tf.cast(graph, matched, "bool", dtype,
+      name .. "/matched_float")
+    local counts = tf.reduce_sum(graph, matched_float, { 1 },
+      name .. "/counts", dtype, false)
+    local losses = tf.sub(graph, one, counts, name .. "/losses", dtype)
+    return tf.reduce_mean(graph, losses, { 0 }, name, dtype)
+  end
+  local predicted_int = tf.cast(graph, predicted, "bool", "int32",
+    name .. "/predicted_int")
+  local mismatch = Ops.not_equal(graph, truth, predicted_int,
+    name .. "/mismatch", "int32")
+  local mismatch_float = tf.cast(graph, mismatch, "bool", dtype,
+    name .. "/mismatch_float")
+  local counts = tf.reduce_sum(graph, mismatch_float, { 1 },
+    name .. "/mismatch_counts", dtype, false)
+  local classes
+  if options.num_classes ~= nil then
+    validate_num_classes(options.num_classes, name)
+    classes = tf.constant(graph, options.num_classes, name .. "/classes",
+      "int32")
+  else
+    classes = last_dimension(graph, truth, name .. "/classes", "int32")
+  end
+  local denominator = tf.cast(graph, classes, "int32", dtype,
+    name .. "/denominator")
+  local losses = tf.div(graph, counts, denominator, name .. "/losses", dtype)
+  return tf.reduce_mean(graph, losses, { 0 }, name, dtype)
+end
+
+Metrics.HammingLoss = Metrics.hamming_loss
 
 return Metrics

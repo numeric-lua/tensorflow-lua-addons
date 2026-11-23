@@ -25,6 +25,106 @@ local function reduce_elementwise(graph, values, options, name, dtype,
     dtype), { 0 }, name .. "/mean", dtype)
 end
 
+local function pack_int32(graph, values, name)
+  local inputs = {}
+  for index, value in ipairs(values) do
+    if type(value) == "number" then
+      inputs[index] = tf.constant(graph, value, name .. "/" .. index, "int32")
+    else
+      inputs[index] = value
+    end
+  end
+  local desc = graph:new_operation("Pack", name)
+  desc:add_inputs(inputs)
+  desc:set_type("T", "int32")
+  desc:set_int("axis", 0)
+  desc:set_int("N", #inputs)
+  return desc:finish()
+end
+
+local function reshape_dynamic(graph, input, shape, name, dtype)
+  local desc = graph:new_operation("Reshape", name)
+  desc:add_input(input)
+  desc:add_input(pack_int32(graph, shape, name .. "/shape"))
+  desc:set_type("T", dtype)
+  desc:set_type("Tshape", "int32")
+  return desc:finish()
+end
+
+local function tile_dynamic(graph, input, multiples, name, dtype)
+  local desc = graph:new_operation("Tile", name)
+  desc:add_input(input)
+  desc:add_input(pack_int32(graph, multiples, name .. "/multiples"))
+  desc:set_type("T", dtype)
+  desc:set_type("Tmultiples", "int32")
+  return desc:finish()
+end
+
+local function dimension(graph, input, index, name, dtype)
+  local shape = tf.shape(graph, input, name .. "/shape", dtype)
+  local position = tf.constant(graph, index, name .. "/index", "int32")
+  return tf.gather(graph, shape, position, 0, name, "int32")
+end
+
+local function matmul(graph, a, b, transpose_a, transpose_b, name, dtype)
+  local desc = graph:new_operation("MatMul", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", dtype)
+  desc:set_bool("transpose_a", transpose_a == true)
+  desc:set_bool("transpose_b", transpose_b == true)
+  return desc:finish()
+end
+
+local function transpose(graph, input, perm, name, dtype)
+  return tf.transpose(graph, input, perm, name, dtype)
+end
+
+local function identity_matrix(graph, count, name, dtype)
+  local start = tf.constant(graph, 0, name .. "/start", "int32")
+  local delta = tf.constant(graph, 1, name .. "/delta", "int32")
+  local desc = graph:new_operation("Range", name .. "/range")
+  desc:add_input(start)
+  desc:add_input(count)
+  desc:add_input(delta)
+  desc:set_type("Tidx", "int32")
+  local indices = desc:finish()
+  local row = tf.reshape(graph, indices, { -1, 1 }, name .. "/row", "int32")
+  local column = tf.reshape(graph, indices, { 1, -1 }, name .. "/column",
+    "int32")
+  local same = Ops.equal(graph, row, column, name .. "/equal", "int32")
+  return tf.cast(graph, same, "bool", dtype, name)
+end
+
+-- Stable log-softmax cross entropy for a square batch similarity matrix whose
+-- rows are already normalized target distributions (the N-pairs formulation).
+local function softmax_cross_entropy(graph, logits, targets, name, dtype)
+  local maximum = tf.reduce_max(graph, logits, { 1 }, name .. "/maximum",
+    dtype, true)
+  local shifted = tf.sub(graph, logits, maximum, name .. "/shifted", dtype)
+  local exponentials = tf.exp(graph, shifted, name .. "/exponentials", dtype)
+  local total = tf.reduce_sum(graph, exponentials, { 1 }, name .. "/total",
+    dtype, true)
+  local log_total = tf.log(graph, total, name .. "/log_total", dtype)
+  local log_probabilities = tf.sub(graph, shifted, log_total,
+    name .. "/log_probabilities", dtype)
+  local weighted = tf.mul(graph, targets, log_probabilities,
+    name .. "/weighted", dtype)
+  local row_loss = tf.reduce_sum(graph, weighted, { 1 },
+    name .. "/row_loss", dtype, false)
+  local negative = tf.constant(graph, -1, name .. "/negative", dtype)
+  row_loss = tf.mul(graph, negative, row_loss, name .. "/positive_row_loss",
+    dtype)
+  return tf.reduce_mean(graph, row_loss, { 0 }, name, dtype)
+end
+
+local function npairs_common(graph, labels, adjacency, name, dtype)
+  local row_sums = tf.reduce_sum(graph, adjacency, { 1 },
+    name .. "/row_sums", dtype, true)
+  local targets = tf.div(graph, adjacency, row_sums, name .. "/targets", dtype)
+  return softmax_cross_entropy(graph, labels, targets, name, dtype)
+end
+
 -- Log-cosh loss, matching tfa.losses.LogCosh.  The stable form
 -- |x| + softplus(-2|x|) - log(2) avoids overflow for large residuals.
 function Losses.log_cosh(graph, labels, predictions, options)
@@ -416,5 +516,233 @@ function Losses.triplet(graph, anchor, positive, negative, options)
   return Ops.maximum(graph, difference, tf.constant(graph, 0,
     name .. "/zero", dtype), name .. "/loss", dtype)
 end
+
+-- N-pairs loss, matching tfa.losses.npairs_loss.  The prediction is the
+-- [batch_size, batch_size] similarity matrix; labels are 1-D class ids.
+function Losses.npairs_loss(graph, labels, similarity, options)
+  options = options or {}
+  local name = options.name or "npairs_loss"
+  local dtype = options.dtype or similarity.dtype or "float32"
+  local precision = similarity.dtype or "float32"
+  similarity = tf.cast(graph, similarity, precision, dtype,
+    name .. "/similarity")
+  local label_dtype = labels.dtype or "int32"
+  labels = tf.cast(graph, labels, label_dtype, "int32", name .. "/labels")
+  local column = tf.reshape(graph, labels, { -1, 1 }, name .. "/column",
+    "int32")
+  local row = tf.reshape(graph, labels, { 1, -1 }, name .. "/row", "int32")
+  local same = Ops.equal(graph, column, row, name .. "/same", "int32")
+  local adjacency = tf.cast(graph, same, "bool", dtype, name .. "/adjacency")
+  return npairs_common(graph, similarity, adjacency, name, dtype)
+end
+
+Losses.NpairsLoss = Losses.npairs_loss
+
+-- Multilabel N-pairs loss, matching tfa.losses.npairs_multilabel_loss.  Labels
+-- are [batch_size, num_classes] binary indicators; the adjacency matrix counts
+-- shared labels and each row is normalized before the softmax cross entropy.
+function Losses.npairs_multilabel_loss(graph, labels, similarity, options)
+  options = options or {}
+  local name = options.name or "npairs_multilabel_loss"
+  local dtype = options.dtype or similarity.dtype or "float32"
+  local precision = similarity.dtype or "float32"
+  similarity = tf.cast(graph, similarity, precision, dtype,
+    name .. "/similarity")
+  labels = tf.cast(graph, labels, labels.dtype or dtype, dtype,
+    name .. "/labels")
+  local counts = matmul(graph, labels, labels, false, true,
+    name .. "/counts", dtype)
+  return npairs_common(graph, similarity, counts, name, dtype)
+end
+
+Losses.NpairsMultilabelLoss = Losses.npairs_multilabel_loss
+
+local function pairwise_distance(graph, embeddings, metric, name, dtype)
+  local normal = string.lower(metric or "L2")
+  if normal == "angular" then
+    local squared = tf.square(graph, embeddings, name .. "/squared", dtype)
+    local sums = tf.reduce_sum(graph, squared, { 1 }, name .. "/sums", dtype,
+      true)
+    local floor = tf.constant(graph, 1e-12, name .. "/angular_epsilon",
+      dtype)
+    local safe = Ops.maximum(graph, sums, floor, name .. "/angular_safe",
+      dtype)
+    local norm = tf.sqrt(graph, safe, name .. "/norm", dtype)
+    local normalized = tf.div(graph, embeddings, norm,
+      name .. "/normalized", dtype)
+    local similarity = matmul(graph, normalized, normalized, false, true,
+      name .. "/similarity", dtype)
+    local one = tf.constant(graph, 1, name .. "/angular_one", dtype)
+    local zero = tf.constant(graph, 0, name .. "/angular_zero", dtype)
+    return Ops.maximum(graph, tf.sub(graph, one, similarity,
+      name .. "/angular_raw", dtype), zero, name .. "/angular", dtype)
+  end
+
+  local squared = tf.square(graph, embeddings, name .. "/squared", dtype)
+  local row_sums = tf.reduce_sum(graph, squared, { 1 }, name .. "/row_sums",
+    dtype, true)
+  local transposed = tf.transpose(graph, embeddings, { 1, 0 },
+    name .. "/transposed", dtype)
+  local transposed_squared = tf.square(graph, transposed,
+    name .. "/transposed_squared", dtype)
+  local column_sums = tf.reduce_sum(graph, transposed_squared, { 0 },
+    name .. "/column_sums", dtype, true)
+  local products = matmul(graph, embeddings, transposed, false, false,
+    name .. "/products", dtype)
+  local two = tf.constant(graph, 2, name .. "/distance_two", dtype)
+  local zero = tf.constant(graph, 0, name .. "/distance_zero", dtype)
+  local distances_squared = tf.sub(graph, tf.add(graph, row_sums, column_sums,
+    name .. "/sum_squares", dtype), tf.mul(graph, two, products,
+    name .. "/twice_products", dtype), name .. "/difference", dtype)
+  distances_squared = Ops.maximum(graph, distances_squared, zero,
+    name .. "/squared_distances", dtype)
+  local error_mask = Ops.less_equal(graph, distances_squared, zero,
+    name .. "/error_mask", dtype)
+  local distances
+  if normal == "squared-l2" then
+    distances = distances_squared
+  elseif normal == "l2" then
+    local error_float = tf.cast(graph, error_mask, "bool", dtype,
+      name .. "/error_float")
+    local epsilon = tf.constant(graph, 1e-16, name .. "/distance_epsilon",
+      dtype)
+    local stable = tf.add(graph, distances_squared, tf.mul(graph, error_float,
+      epsilon, name .. "/stable_offset", dtype), name .. "/stable", dtype)
+    distances = tf.sqrt(graph, stable, name .. "/distances", dtype)
+  else
+    error("triplet_semihard_loss distance_metric must be 'L2', " ..
+      "'squared-L2', or 'angular'", 4)
+  end
+  local valid = tf.cast(graph, Ops.logical_not(graph, error_mask,
+    name .. "/valid_mask"), "bool", dtype, name .. "/valid")
+  distances = tf.mul(graph, distances, valid, name .. "/masked", dtype)
+  local batch_size = dimension(graph, embeddings, 0,
+    name .. "/pairwise_batch_size", dtype)
+  local identity = identity_matrix(graph, batch_size,
+    name .. "/distance_identity", dtype)
+  local one = tf.constant(graph, 1, name .. "/distance_one", dtype)
+  local off_diagonals = tf.sub(graph, one, identity,
+    name .. "/off_diagonals", dtype)
+  return tf.mul(graph, distances, off_diagonals, name .. "/pairwise", dtype)
+end
+
+local function masked_minimum(graph, data, mask, name, dtype)
+  local maximum = tf.reduce_max(graph, data, { 1 }, name .. "/maximum", dtype,
+    true)
+  local shifted = tf.sub(graph, data, maximum, name .. "/shifted", dtype)
+  local masked = tf.mul(graph, shifted, mask, name .. "/masked", dtype)
+  local minimum = tf.reduce_min(graph, masked, { 1 }, name .. "/minimum",
+    dtype, true)
+  return tf.add(graph, minimum, maximum, name, dtype)
+end
+
+local function masked_maximum(graph, data, mask, name, dtype)
+  local minimum = tf.reduce_min(graph, data, { 1 }, name .. "/minimum", dtype,
+    true)
+  local shifted = tf.sub(graph, data, minimum, name .. "/shifted", dtype)
+  local masked = tf.mul(graph, shifted, mask, name .. "/masked", dtype)
+  local maximum = tf.reduce_max(graph, masked, { 1 }, name .. "/maximum",
+    dtype, true)
+  return tf.add(graph, maximum, minimum, name, dtype)
+end
+
+-- Semi-hard triplet loss, matching tfa.losses.triplet_semihard_loss.  Labels
+-- are 1-D class ids and predictions are [batch_size, embedding_dim] vectors.
+function Losses.triplet_semihard_loss(graph, labels, embeddings, options)
+  options = options or {}
+  local name = options.name or "triplet_semihard_loss"
+  local source_dtype = options.dtype or embeddings.dtype or "float32"
+  local dtype = source_dtype
+  local restore = false
+  if dtype == "float16" or dtype == "bfloat16" then
+    dtype = "float32"
+    restore = true
+  end
+  local margin = options.margin or 1
+  if type(margin) ~= "number" or margin ~= margin then
+    error("triplet_semihard_loss margin must be a number", 4)
+  end
+  local metric = options.distance_metric or "L2"
+  if type(metric) ~= "string" then
+    error("triplet_semihard_loss distance_metric must be a string", 4)
+  end
+  embeddings = tf.cast(graph, embeddings, source_dtype, dtype,
+    name .. "/embeddings")
+  labels = tf.cast(graph, labels, labels.dtype or "int32", "int32",
+    name .. "/labels")
+
+  local distances = pairwise_distance(graph, embeddings, metric, name, dtype)
+  local column = tf.reshape(graph, labels, { -1, 1 }, name .. "/column",
+    "int32")
+  local row = tf.reshape(graph, labels, { 1, -1 }, name .. "/row", "int32")
+  local adjacency_bool = Ops.equal(graph, column, row, name .. "/adjacency",
+    "int32")
+  local adjacency_not_bool = Ops.logical_not(graph, adjacency_bool,
+    name .. "/adjacency_not")
+  local adjacency = tf.cast(graph, adjacency_bool, "bool", dtype,
+    name .. "/adjacency_float")
+  local adjacency_not = tf.cast(graph, adjacency_not_bool, "bool", dtype,
+    name .. "/adjacency_not_float")
+  local batch_size = dimension(graph, embeddings, 0, name .. "/batch_size",
+    dtype)
+  local zip = tf.constant(graph, 1, name .. "/tile_one", "int32")
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+
+  local distance_tile = tile_dynamic(graph, distances, { batch_size, zip },
+    name .. "/distance_tile", dtype)
+  local adjacency_not_tile = tile_dynamic(graph, adjacency_not_bool,
+    { batch_size, zip }, name .. "/adjacency_not_tile", "bool")
+  local transposed_distances = tf.transpose(graph, distances, { 1, 0 },
+    name .. "/transposed_distances", dtype)
+  local distance_column = tf.reshape(graph, transposed_distances, { -1, 1 },
+    name .. "/distance_column", dtype)
+  local mask = Ops.logical_and(graph, adjacency_not_tile,
+    Ops.greater(graph, distance_tile, distance_column,
+      name .. "/greater_distance", dtype), name .. "/mask")
+  local mask_float = tf.cast(graph, mask, "bool", dtype, name .. "/mask_float")
+  local mask_counts = tf.reduce_sum(graph, mask_float, { 1 },
+    name .. "/mask_counts", dtype, true)
+  local has_mask = Ops.greater(graph, mask_counts, zero,
+    name .. "/has_mask", dtype)
+  local mask_final = tf.transpose(graph, reshape_dynamic(graph, has_mask,
+    { batch_size, batch_size }, name .. "/mask_final_flat", "bool"),
+    { 1, 0 }, name .. "/mask_final", "bool")
+
+  local negatives_outside = masked_minimum(graph, distance_tile, mask_float,
+    name .. "/negatives_outside_flat", dtype)
+  negatives_outside = transpose(graph, reshape_dynamic(graph,
+    negatives_outside, { batch_size, batch_size },
+    name .. "/negatives_outside_reshape", dtype), { 1, 0 },
+    name .. "/negatives_outside", dtype)
+  local negatives_inside = masked_maximum(graph, distances, adjacency_not,
+    name .. "/negatives_inside_flat", dtype)
+  negatives_inside = tile_dynamic(graph, negatives_inside, { zip, batch_size },
+    name .. "/negatives_inside", dtype)
+  local semi_hard = tf.where(graph, mask_final, negatives_outside,
+    negatives_inside, name .. "/semi_hard", dtype)
+
+  local margin_op = tf.constant(graph, margin, name .. "/margin", dtype)
+  local loss_matrix = tf.add(graph, tf.sub(graph, distances, semi_hard,
+    name .. "/distance_difference", dtype), margin_op,
+    name .. "/loss_matrix", dtype)
+  local identity = identity_matrix(graph, batch_size, name .. "/identity",
+    dtype)
+  local positive_mask = tf.sub(graph, adjacency, identity,
+    name .. "/positive_mask", dtype)
+  local positive_loss = Ops.maximum(graph, tf.mul(graph, loss_matrix,
+    positive_mask, name .. "/positive_loss_values", dtype), zero,
+    name .. "/positive_loss", dtype)
+  local numerator = Ops.sum_all(graph, positive_loss,
+    name .. "/positive_sum", dtype)
+  local denominator = Ops.sum_all(graph, positive_mask,
+    name .. "/positive_count", dtype)
+  local loss = Ops.clean_div(graph, numerator, denominator, name, dtype, 1e-12)
+  if restore then
+    loss = tf.cast(graph, loss, dtype, source_dtype, name .. "/restored")
+  end
+  return loss
+end
+
+Losses.TripletSemiHardLoss = Losses.triplet_semihard_loss
 
 return Losses

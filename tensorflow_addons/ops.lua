@@ -33,6 +33,43 @@ function Ops.greater(graph, a, b, name, dtype)
   return desc:finish()
 end
 
+function Ops.equal(graph, a, b, name, dtype)
+  local desc = graph:new_operation("Equal", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", dtype or "float32")
+  return desc:finish()
+end
+
+function Ops.not_equal(graph, a, b, name, dtype)
+  local desc = graph:new_operation("NotEqual", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", dtype or "float32")
+  return desc:finish()
+end
+
+function Ops.less_equal(graph, a, b, name, dtype)
+  local desc = graph:new_operation("LessEqual", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", dtype or "float32")
+  return desc:finish()
+end
+
+function Ops.logical_not(graph, input, name)
+  local desc = graph:new_operation("LogicalNot", name)
+  desc:add_input(input)
+  return desc:finish()
+end
+
+function Ops.logical_and(graph, a, b, name)
+  local desc = graph:new_operation("LogicalAnd", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  return desc:finish()
+end
+
 function Ops.flatten(graph, input, name, dtype)
   return tf.reshape(graph, input, { -1 }, name, dtype)
 end
