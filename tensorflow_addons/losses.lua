@@ -11,6 +11,20 @@ local function prepare(graph, labels, predictions, name, dtype)
   return labels, predictions
 end
 
+local function reduce_elementwise(graph, values, options, name, dtype,
+    default_reduction)
+  local reduction = options.reduction or default_reduction or "mean"
+  if reduction == "none" then return values end
+  if reduction == "sum" then
+    return Ops.sum_all(graph, values, name .. "/sum", dtype)
+  end
+  if reduction ~= "mean" and reduction ~= "sum_over_batch_size" then
+    error(name .. " reduction must be 'none', 'mean', or 'sum'", 5)
+  end
+  return tf.reduce_mean(graph, Ops.flatten(graph, values, name .. "/flat",
+    dtype), { 0 }, name .. "/mean", dtype)
+end
+
 -- Log-cosh loss, matching tfa.losses.LogCosh.  The stable form
 -- |x| + softplus(-2|x|) - log(2) avoids overflow for large residuals.
 function Losses.log_cosh(graph, labels, predictions, options)
@@ -239,6 +253,141 @@ function Losses.contrastive(graph, labels, left, right, options)
   return tf.reduce_mean(graph, tf.add(graph, positive, negative,
     name .. "/loss_values", dtype), { 0 }, name .. "/loss", dtype)
 end
+
+-- Pinball / quantile loss, matching tfa.losses.pinball_loss.  The default
+-- reduction is the mean over every element; "none" keeps the elementwise
+-- values and "sum" totals them.
+function Losses.pinball(graph, labels, predictions, options)
+  options = options or {}
+  local name = options.name or "pinball_loss"
+  local dtype = options.dtype or "float32"
+  labels = tf.cast(graph, labels, labels.dtype or "float32", dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or "float32",
+    dtype, name .. "/predictions")
+  local tau_value = options.tau
+  if tau_value == nil then tau_value = 0.5 end
+  local tau
+  if type(tau_value) == "number" then
+    if tau_value ~= tau_value or tau_value < 0 or tau_value > 1 then
+      error("pinball tau must be a number in [0, 1]", 4)
+    end
+    tau = tf.constant(graph, tau_value, name .. "/tau", dtype)
+  else
+    tau = tf.cast(graph, tau_value, tau_value.dtype or dtype, dtype,
+      name .. "/tau")
+  end
+  local delta = tf.sub(graph, labels, predictions, name .. "/delta", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local positive = tf.mul(graph, tau, delta, name .. "/positive", dtype)
+  local tau_minus_one = tf.sub(graph, tau, one, name .. "/tau_minus_one",
+    dtype)
+  local negative = tf.mul(graph, tau_minus_one, delta,
+    name .. "/negative", dtype)
+  local values = Ops.maximum(graph, positive, negative,
+    name .. "/loss_values", dtype)
+  return reduce_elementwise(graph, values, options, name, dtype, "mean")
+end
+
+Losses.PinballLoss = Losses.pinball
+Losses.pinball_loss = Losses.pinball
+
+-- Sigmoid focal cross entropy, matching tfa.losses.sigmoid_focal_crossentropy.
+-- The default reduction is "none", like the TensorFlow Addons function;
+-- "mean" and "sum" are also accepted.
+function Losses.sigmoid_focal_crossentropy(graph, labels, predictions, options)
+  options = options or {}
+  local name = options.name or "sigmoid_focal_crossentropy"
+  local dtype = options.dtype or "float32"
+  local alpha = options.alpha
+  if alpha == nil then alpha = 0.25 end
+  if alpha ~= false and (type(alpha) ~= "number" or alpha ~= alpha or
+      alpha < 0 or alpha > 1) then
+    error("sigmoid_focal_crossentropy alpha must be a number in [0, 1]", 4)
+  end
+  local gamma = options.gamma
+  if gamma == nil then gamma = 2 end
+  if gamma ~= false and (type(gamma) ~= "number" or gamma ~= gamma or
+      gamma < 0) then
+    error("sigmoid_focal_crossentropy gamma must be a non-negative number", 4)
+  end
+  local from_logits = options.from_logits == true
+  labels = tf.cast(graph, labels, labels.dtype or "float32", dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or "float32",
+    dtype, name .. "/predictions")
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local negative_one = tf.constant(graph, -1, name .. "/negative_one", dtype)
+  local binary_cross_entropy, prediction_probability
+  if from_logits then
+    local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+    local positive_logits = Ops.maximum(graph, predictions, zero,
+      name .. "/positive_logits", dtype)
+    local absolute_logits = tf.abs(graph, predictions,
+      name .. "/absolute_logits", dtype)
+    local negative_absolute = tf.mul(graph, negative_one, absolute_logits,
+      name .. "/negative_absolute", dtype)
+    local softplus = tf.nn.softplus(graph, negative_absolute,
+      name .. "/softplus", dtype)
+    local weighted_logits = tf.mul(graph, predictions, labels,
+      name .. "/weighted_logits", dtype)
+    binary_cross_entropy = tf.add(graph, tf.sub(graph, positive_logits,
+      weighted_logits, name .. "/logit_difference", dtype), softplus,
+      name .. "/cross_entropy", dtype)
+    prediction_probability = tf.nn.sigmoid(graph, predictions,
+      name .. "/sigmoid", dtype)
+  else
+    local clipped = tf.clip_by_value(graph, predictions, 1e-7, 1 - 1e-7,
+      name .. "/clipped", dtype)
+    local log_positive = tf.log(graph, clipped, name .. "/log_positive", dtype)
+    local one_minus_labels = tf.sub(graph, one, labels,
+      name .. "/one_minus_labels", dtype)
+    local one_minus_clipped = tf.sub(graph, one, clipped,
+      name .. "/one_minus_clipped", dtype)
+    local log_negative = tf.log(graph, one_minus_clipped,
+      name .. "/log_negative", dtype)
+    local positive = tf.mul(graph, labels, log_positive,
+      name .. "/positive", dtype)
+    local negative = tf.mul(graph, one_minus_labels, log_negative,
+      name .. "/negative", dtype)
+    binary_cross_entropy = tf.mul(graph, negative_one,
+      tf.add(graph, positive, negative, name .. "/log_sum", dtype),
+      name .. "/cross_entropy", dtype)
+    prediction_probability = predictions
+  end
+  local one_minus_labels = tf.sub(graph, one, labels,
+    name .. "/probability_one_minus_labels", dtype)
+  local positive_probability = tf.mul(graph, labels, prediction_probability,
+    name .. "/positive_probability", dtype)
+  local one_minus_probability = tf.sub(graph, one, prediction_probability,
+    name .. "/one_minus_probability", dtype)
+  local negative_probability = tf.mul(graph, one_minus_labels,
+    one_minus_probability, name .. "/negative_probability", dtype)
+  local p_t = tf.add(graph, positive_probability, negative_probability,
+    name .. "/p_t", dtype)
+  local loss = binary_cross_entropy
+  if alpha ~= false then
+    local alpha_op = tf.constant(graph, alpha, name .. "/alpha", dtype)
+    local one_minus_alpha = tf.constant(graph, 1 - alpha,
+      name .. "/one_minus_alpha", dtype)
+    local alpha_factor = tf.add(graph, tf.mul(graph, labels, alpha_op,
+      name .. "/alpha_positive", dtype), tf.mul(graph, one_minus_labels,
+      one_minus_alpha, name .. "/alpha_negative", dtype),
+      name .. "/alpha_factor", dtype)
+    loss = tf.mul(graph, loss, alpha_factor, name .. "/alpha_loss", dtype)
+  end
+  if gamma ~= false and gamma ~= 0 then
+    local gamma_op = tf.constant(graph, gamma, name .. "/gamma", dtype)
+    local one_minus_p_t = tf.sub(graph, one, p_t,
+      name .. "/one_minus_p_t", dtype)
+    local modulating = Ops.pow(graph, one_minus_p_t, gamma_op,
+      name .. "/modulating_factor", dtype)
+    loss = tf.mul(graph, loss, modulating, name .. "/focal_loss", dtype)
+  end
+  return reduce_elementwise(graph, loss, options, name, dtype, "none")
+end
+
+Losses.SigmoidFocalCrossEntropy = Losses.sigmoid_focal_crossentropy
 
 function Losses.triplet(graph, anchor, positive, negative, options)
   options = options or {}

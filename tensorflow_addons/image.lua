@@ -80,7 +80,7 @@ local function depthwise_conv(graph, input, filter, padding, name, dtype)
   return desc:finish()
 end
 
-local function validate_filter_shape(value, name)
+local function validate_filter_shape(value, name, allow_even)
   value = value or { 3, 3 }
   if type(value) ~= "table" or #value ~= 2 then
     error(name .. " filter_shape must be {height, width}", 4)
@@ -90,7 +90,7 @@ local function validate_filter_shape(value, name)
     if type(dimension) ~= "number" or dimension % 1 ~= 0 or dimension < 1 then
       error(name .. " filter_shape dimensions must be positive integers", 4)
     end
-    if dimension % 2 == 0 then
+    if not allow_even and dimension % 2 == 0 then
       error(name .. " filter_shape dimensions must be odd", 4)
     end
   end
@@ -220,6 +220,148 @@ function Image.gaussian_filter2d(graph, input, options)
     output = tf.squeeze(graph, output, 0, name .. "/unbatch", dtype)
   end
   return output
+end
+
+local function image_rank(name, options)
+  local rank = options.rank or
+    (type(options.input_shape) == "table" and #options.input_shape) or 4
+  if rank ~= 2 and rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-2, rank-3, or rank-4 inputs", 4)
+  end
+  return rank
+end
+
+local function to_4d_image(graph, input, rank, name, dtype)
+  if rank == 2 then
+    local batched = tf.expand_dims(graph, input, 0, name .. "/batch", dtype)
+    return tf.expand_dims(graph, batched, 3, name .. "/channel", dtype)
+  end
+  if rank == 3 then
+    return tf.expand_dims(graph, input, 0, name .. "/batch", dtype)
+  end
+  return input
+end
+
+local function from_4d_image(graph, input, rank, name, dtype)
+  if rank == 2 then
+    return tf.squeeze(graph, input, { 0, 3 }, name .. "/unbatch", dtype)
+  end
+  if rank == 3 then
+    return tf.squeeze(graph, input, 0, name .. "/unbatch", dtype)
+  end
+  return input
+end
+
+local function reshape_dynamic(graph, input, shape, name, dtype)
+  local desc = graph:new_operation("Reshape", name)
+  desc:add_input(input)
+  desc:add_input(shape)
+  desc:set_type("T", dtype)
+  desc:set_type("Tshape", "int32")
+  return desc:finish()
+end
+
+local function extract_image_patches(graph, input, height, width, name, dtype)
+  local desc = graph:new_operation("ExtractImagePatches", name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  desc:set_int_list("ksizes", { 1, height, width, 1 })
+  desc:set_int_list("strides", { 1, 1, 1, 1 })
+  desc:set_int_list("rates", { 1, 1, 1, 1 })
+  desc:set_string("padding", "VALID")
+  return desc:finish()
+end
+
+local function compute_dtype(dtype)
+  if dtype == "float16" or dtype == "float32" or dtype == "float64" then
+    return dtype
+  end
+  return "float32"
+end
+
+-- Median filtering, matching tfa.image.median_filter2d's filter_shape,
+-- padding, and constant_values options.  Supports rank-2, rank-3, and rank-4
+-- images and both odd and even filter sizes.
+function Image.median_filter2d(graph, input, options)
+  options = options or {}
+  local name = options.name or "median_filter2d"
+  local source_dtype = options.dtype or input.dtype or "float32"
+  local dtype = compute_dtype(source_dtype)
+  local rank = image_rank(name, options)
+  local padding = string.upper(options.padding or "REFLECT")
+  if padding ~= "REFLECT" and padding ~= "SYMMETRIC" and
+      padding ~= "CONSTANT" then
+    error(name .. " padding must be REFLECT, SYMMETRIC, or CONSTANT", 3)
+  end
+  local height, width = validate_filter_shape(options.filter_shape, name, true)
+  local area = height * width
+  local image = input
+  if source_dtype ~= dtype then
+    image = tf.cast(graph, input, source_dtype, dtype, name .. "/compute_input")
+  end
+  image = to_4d_image(graph, image, rank, name .. "/image", dtype)
+  local pad_top = math.floor((height - 1) / 2)
+  local pad_left = math.floor((width - 1) / 2)
+  image = pad_image(graph, image, {
+    { 0, 0 },
+    { pad_top, height - 1 - pad_top },
+    { pad_left, width - 1 - pad_left },
+    { 0, 0 },
+  }, padding, options.constant_values or 0, name .. "/padded", dtype)
+  local patches = extract_image_patches(graph, image, height, width,
+    name .. "/patches", dtype)
+  local patch_shape = tf.shape(graph, patches, name .. "/patch_shape", dtype)
+  local function dimension(index, label)
+    return tf.gather(graph, patch_shape, tf.constant(graph, index,
+      name .. "/" .. label .. "_index", "int32"), 0,
+      name .. "/" .. label, "int32")
+  end
+  local batch = dimension(0, "batch")
+  local rows = dimension(1, "rows")
+  local columns = dimension(2, "columns")
+  local channels = last_dimension(graph, image, name .. "/channels", dtype)
+  local target_shape = pack_int32(graph, {
+    batch,
+    rows,
+    columns,
+    tf.constant(graph, area, name .. "/area", "int32"),
+    channels,
+  }, name .. "/target_shape")
+  local grouped = reshape_dynamic(graph, patches, target_shape,
+    name .. "/grouped", dtype)
+  local transposed = tf.transpose(graph, grouped, { 0, 1, 2, 4, 3 },
+    name .. "/channels_last", dtype)
+  local top_k = tf.constant(graph, math.floor(area / 2) + 1,
+    name .. "/top_k", "int32")
+  local desc = graph:new_operation("TopKV2", name .. "/top_values")
+  desc:add_input(transposed)
+  desc:add_input(top_k)
+  desc:set_type("T", dtype)
+  desc:set_bool("sorted", true)
+  local top = desc:finish()
+  local top_values = { oper = top.oper, index = 0,
+    name = name .. "/top_values:0", dtype = dtype }
+  local floor = math.floor((area + 1) / 2)
+  local ceil = math.floor(area / 2) + 1
+  local function column(index, label)
+    return tf.gather(graph, top_values, tf.constant(graph, index,
+      name .. "/" .. label .. "_index", "int32"), 4,
+      name .. "/" .. label, dtype)
+  end
+  local median
+  if area % 2 == 1 then
+    median = column(floor - 1, "median")
+  else
+    local lower = column(floor - 1, "lower_median")
+    local upper = column(ceil - 1, "upper_median")
+    local total = tf.add(graph, lower, upper, name .. "/median_sum", dtype)
+    local two = tf.constant(graph, 2, name .. "/two", dtype)
+    median = tf.div(graph, total, two, name .. "/median", dtype)
+  end
+  if source_dtype ~= dtype then
+    median = tf.cast(graph, median, dtype, source_dtype, name .. "/output")
+  end
+  return from_4d_image(graph, median, rank, name, source_dtype)
 end
 
 return Image

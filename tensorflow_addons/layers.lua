@@ -387,4 +387,64 @@ end
 
 Layers.Maxout = Layers.maxout
 
+local function random_uniform_scalar(graph, name, dtype, seed, seed2)
+  local shape = tf.constant(graph, {}, name .. "/shape", "int32")
+  local desc = graph:new_operation("RandomUniform", name)
+  desc:add_input(shape)
+  desc:set_type("dtype", dtype)
+  desc:set_int("seed", seed or 0)
+  desc:set_int("seed2", seed2 or 0)
+  return desc:finish()
+end
+
+local function less_scalar(graph, value, threshold, name, dtype)
+  local desc = graph:new_operation("Less", name)
+  desc:add_input(value)
+  desc:add_input(threshold)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+-- Stochastic depth, matching tfa.layers.StochasticDepth's [shortcut, residual]
+-- semantics.  Training keeps the whole residual branch with probability
+-- survival_probability; inference scales the residual by that probability.
+function Layers.stochastic_depth(graph, shortcut, residual, options)
+  options = options or {}
+  local name = options.name or "stochastic_depth"
+  local dtype = options.dtype or shortcut.dtype or "float32"
+  local probability = options.survival_probability
+  if probability == nil then probability = 0.5 end
+  if type(probability) ~= "number" or probability ~= probability or
+      probability < 0 or probability > 1 then
+    error("stochastic_depth survival_probability must be in [0, 1]", 3)
+  end
+  local shortcut_value = tf.cast(graph, shortcut,
+    shortcut.dtype or dtype, dtype, name .. "/shortcut")
+  local residual_value = tf.cast(graph, residual,
+    residual.dtype or dtype, dtype, name .. "/residual")
+  local probability_op = tf.constant(graph, probability,
+    name .. "/survival_probability", dtype)
+  local scaled_residual = tf.mul(graph, probability_op, residual_value,
+    name .. "/scaled_residual", dtype)
+  local inference = tf.add(graph, shortcut_value, scaled_residual,
+    name .. "/inference", dtype)
+  local training = options.training
+  if training == false then return inference end
+  local random = random_uniform_scalar(graph, name .. "/random", dtype,
+    options.seed, options.seed2)
+  local mask = less_scalar(graph, random, probability_op, name .. "/mask",
+    dtype)
+  local mask_value = tf.cast(graph, mask, "bool", dtype, name .. "/mask_value")
+  local residual_branch = tf.mul(graph, mask_value, residual_value,
+    name .. "/residual_branch", dtype)
+  local train_output = tf.add(graph, shortcut_value, residual_branch,
+    name .. "/training", dtype)
+  if type(training) == "table" and training.oper ~= nil then
+    return tf.where(graph, training, train_output, inference, name, dtype)
+  end
+  return train_output
+end
+
+Layers.StochasticDepth = Layers.stochastic_depth
+
 return Layers

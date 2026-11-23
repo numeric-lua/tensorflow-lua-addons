@@ -895,6 +895,255 @@ test("poisson returns the rate and applies inverse-CDF noise", function()
   session:close()
 end)
 
+test("pinball loss matches the quantile formula and reductions", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 4 }, "pinball_labels")
+  local predictions = tf.placeholder(graph, "float32", { 4 },
+    "pinball_predictions")
+  local outputs = {
+    tfa.losses.pinball(graph, labels, predictions,
+      { tau = 0.1, reduction = "none", name = "pinball_none" }),
+    tfa.losses.pinball(graph, labels, predictions,
+      { tau = 0.1, reduction = "mean", name = "pinball_mean" }),
+    tfa.losses.pinball(graph, labels, predictions,
+      { tau = 0.1, reduction = "sum", name = "pinball_sum" }),
+  }
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 0, 0, 1, 1 },
+    [predictions] = { 1, 1, 1, 0 },
+  }, outputs)
+  local elementwise = values[1]:totable()
+  local expected = { 0.9, 0.9, 0, 0.1 }
+  for index = 1, 4 do
+    near(elementwise[index], expected[index], 1e-6,
+      "pinball element " .. index)
+  end
+  near(values[2]:totable(), 0.475, 1e-6, "pinball mean")
+  near(values[3]:totable(), 1.9, 1e-6, "pinball sum")
+  assert_true(tfa.losses.PinballLoss == tfa.losses.pinball)
+  assert_true(tfa.losses.pinball_loss == tfa.losses.pinball)
+  session:close()
+end)
+
+test("sigmoid focal cross entropy matches Addons values and logits", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 3, 1 },
+    "sigmoid_focal_labels")
+  local predictions = tf.placeholder(graph, "float32", { 3, 1 },
+    "sigmoid_focal_predictions")
+  local elementwise = tfa.losses.sigmoid_focal_crossentropy(graph, labels,
+    predictions, { reduction = "none", name = "sigmoid_focal_none" })
+  local mean = tfa.losses.sigmoid_focal_crossentropy(graph, labels,
+    predictions, { reduction = "mean", name = "sigmoid_focal_mean" })
+  local total = tfa.losses.sigmoid_focal_crossentropy(graph, labels,
+    predictions, { reduction = "sum", name = "sigmoid_focal_sum" })
+  local logits = tf.constant(graph, { { 3.4760986898352724 },
+    { 2.313634929180631 }, { -3.4760986898352733 } }, "sigmoid_focal_logits",
+    "float32")
+  local from_logits = tfa.losses.sigmoid_focal_crossentropy(graph, labels,
+    logits, { from_logits = true, reduction = "none",
+      name = "sigmoid_focal_logits" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { { 1 }, { 1 }, { 0 } },
+    [predictions] = { { 0.97 }, { 0.91 }, { 0.03 } },
+  }, { elementwise, mean, total, from_logits })
+  local expected = { 6.853321684059441e-06, 1.909791259292635e-04,
+    2.0559965052178325e-05 }
+  local actual = values[1]:totable()
+  for index = 1, 3 do
+    near(actual[index][1], expected[index], 1e-8,
+      "sigmoid focal element " .. index)
+    near(values[4]:totable()[index][1], expected[index], 1e-6,
+      "sigmoid focal logits element " .. index)
+  end
+  near(values[2]:totable(),
+    (expected[1] + expected[2] + expected[3]) / 3, 1e-8, "sigmoid focal mean")
+  near(values[3]:totable(), expected[1] + expected[2] + expected[3], 1e-8,
+    "sigmoid focal sum")
+  session:close()
+end)
+
+test("multilabel confusion matrix matches the Addons layout", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 2, 3 },
+    "mlcm_predictions")
+  local labels = tf.placeholder(graph, "float32", { 2, 3 }, "mlcm_labels")
+  local logits = tf.constant(graph, { { 100, -100, -100 },
+    { -100, 100, 100 } }, "mlcm_logits", "float32")
+  local metric = tfa.metrics.multilabel_confusion_matrix(graph, predictions,
+    labels, 3, { name = "mlcm" })
+  local alias = tfa.metrics.MultiLabelConfusionMatrix(graph, predictions,
+    labels, { num_classes = 3, name = "mlcm_alias" })
+  local thresholded = tfa.metrics.multilabel_confusion_matrix(graph,
+    predictions, labels, 3, { threshold = 0.5, name = "mlcm_thresholded" })
+  local from_logits = tfa.metrics.multilabel_confusion_matrix(graph, logits,
+    labels, 3, { from_logits = true, threshold = 0.5,
+      name = "mlcm_from_logits" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { { 1, 0, 1 }, { 0, 1, 0 } },
+    [predictions] = { { 1, 0, 0 }, { 0, 1, 1 } },
+  }, { metric, alias, thresholded, from_logits })
+  local expected = {
+    { { 1, 0 }, { 0, 1 } },
+    { { 1, 0 }, { 0, 1 } },
+    { { 0, 1 }, { 1, 0 } },
+  }
+  for class = 1, 3 do
+    for row = 1, 2 do
+      for column = 1, 2 do
+        near(values[1]:totable()[class][row][column],
+          expected[class][row][column], 0,
+          string.format("mlcm class %d cell %d,%d", class, row, column))
+        near(values[2]:totable()[class][row][column],
+          expected[class][row][column], 0,
+          string.format("mlcm alias class %d cell %d,%d", class, row, column))
+        near(values[3]:totable()[class][row][column],
+          expected[class][row][column], 0,
+          string.format("mlcm threshold class %d cell %d,%d", class, row,
+            column))
+        near(values[4]:totable()[class][row][column],
+          expected[class][row][column], 0,
+          string.format("mlcm logits class %d cell %d,%d", class, row, column))
+      end
+    end
+  end
+  assert_true(tfa.metrics.MultiLabelConfusionMatrix ==
+    tfa.metrics.multilabel_confusion_matrix)
+  session:close()
+end)
+
+test("median_filter2d removes impulses and supports even filters", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 3, 3, 1 }, "median_in")
+  local impulse = tfa.image.median_filter2d(graph, input,
+    { filter_shape = { 3, 3 }, padding = "REFLECT", name = "median_impulse" })
+  local ramp = tfa.image.median_filter2d(graph, input,
+    { filter_shape = { 2, 2 }, padding = "CONSTANT", constant_values = 0,
+      name = "median_ramp" })
+  local session = tf.Session.new(graph)
+  local impulse_tensor = session:run({ [input] = { {
+    { { 0 }, { 0 }, { 0 } },
+    { { 0 }, { 1 }, { 0 } },
+    { { 0 }, { 0 }, { 0 } },
+  } } }, { impulse })[1]
+  assert_eq(table.concat(impulse_tensor:shape(), ","), "1,3,3,1")
+  local impulse_values = impulse_tensor:totable()
+  for row = 1, 3 do
+    for column = 1, 3 do
+      near(impulse_values[1][row][column][1], 0, 0,
+        "median impulse removal")
+    end
+  end
+  local ramp_tensor = session:run({ [input] = { {
+    { { 1 }, { 2 }, { 3 } },
+    { { 4 }, { 5 }, { 6 } },
+    { { 7 }, { 8 }, { 9 } },
+  } } }, { ramp })[1]
+  local ramp_values = ramp_tensor:totable()
+  near(ramp_values[1][1][1][1], 3, 0, "median even filter top-left")
+  near(ramp_values[1][2][2][1], 7, 0, "median even filter center")
+  session:close()
+end)
+
+test("median_filter2d preserves rank-2 and rank-3 constant images", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 3, 3, 2 }, "median_hwc")
+  local grayscale = tf.placeholder(graph, "float32", { 3, 3 }, "median_hw")
+  local filtered = tfa.image.median_filter2d(graph, input,
+    { rank = 3, filter_shape = { 3, 3 }, name = "median_hwc_out" })
+  local flat_filtered = tfa.image.median_filter2d(graph, grayscale,
+    { rank = 2, filter_shape = { 3, 3 }, name = "median_hw_out" })
+  local session = tf.Session.new(graph)
+  local tensor, flat_tensor = unpack(session:run({
+    [input] = {
+      { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+      { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+      { { 1, 1 }, { 1, 1 }, { 1, 1 } },
+    },
+    [grayscale] = { { 1, 1, 1 }, { 1, 1, 1 }, { 1, 1, 1 } },
+  }, { filtered, flat_filtered }))
+  assert_eq(table.concat(tensor:shape(), ","), "3,3,2")
+  local values = tensor:totable()
+  for row = 1, 3 do
+    for column = 1, 3 do
+      for channel = 1, 2 do
+        near(values[row][column][channel], 1, 0,
+          "median rank-3 constant image")
+      end
+    end
+  end
+  assert_eq(table.concat(flat_tensor:shape(), ","), "3,3")
+  local flat_values = flat_tensor:totable()
+  for row = 1, 3 do
+    for column = 1, 3 do
+      near(flat_values[row][column], 1, 0, "median rank-2 constant image")
+    end
+  end
+  session:close()
+end)
+
+test("stochastic depth honors survival probability and training", function()
+  local graph = tf.Graph.new()
+  local shortcut = tf.placeholder(graph, "float32", { 2, 2 }, "sd_shortcut")
+  local residual = tf.placeholder(graph, "float32", { 2, 2 }, "sd_residual")
+  local training = tf.placeholder(graph, "bool", {}, "sd_training")
+  local inference = tfa.layers.stochastic_depth(graph, shortcut, residual,
+    { survival_probability = 0.5, training = false, name = "sd_inference" })
+  local dropped = tfa.layers.stochastic_depth(graph, shortcut, residual,
+    { survival_probability = 0, training = true, name = "sd_dropped" })
+  local kept = tfa.layers.stochastic_depth(graph, shortcut, residual,
+    { survival_probability = 1, training = true, name = "sd_kept" })
+  local dynamic = tfa.layers.stochastic_depth(graph, shortcut, residual,
+    { survival_probability = 0.5, training = training, seed = 7, seed2 = 11,
+      name = "sd_dynamic" })
+  local session = tf.Session.new(graph)
+  local feeds = {
+    [shortcut] = { { 1, 1 }, { 1, 1 } },
+    [residual] = { { 1, 1 }, { 1, 1 } },
+  }
+  feeds[training] = false
+  local values = session:run(feeds, { inference, dropped, kept, dynamic })
+  near(values[1]:totable()[1][1], 1.5, 1e-6, "stochastic depth inference")
+  near(values[2]:totable()[1][1], 1, 0, "stochastic depth dropped")
+  near(values[3]:totable()[1][1], 2, 0, "stochastic depth kept")
+  near(values[4]:totable()[1][1], 1.5, 1e-6,
+    "stochastic depth dynamic inference")
+  feeds[training] = true
+  local train_value = session:run(feeds, { dynamic })[1]:totable()[1][1]
+  assert_true(math.abs(train_value - 1.5) > 1e-6,
+    "stochastic depth training should use a Bernoulli residual mask")
+  session:close()
+end)
+
+test("new parity options reject invalid values", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
+  local predictions = tf.placeholder(graph, "float32", { 1 },
+    "newparity_predictions")
+  local input = tf.placeholder(graph, "float32", { 1, 3, 3, 1 },
+    "newparity_input")
+  local invalid_tau = pcall(tfa.losses.pinball, graph, labels, predictions,
+    { tau = 1.5 })
+  assert_true(not invalid_tau, "pinball should reject tau outside [0, 1]")
+  local invalid_gamma, gamma_error = pcall(
+    tfa.losses.sigmoid_focal_crossentropy, graph, labels, predictions,
+    { gamma = -1 })
+  assert_true(not invalid_gamma,
+    "sigmoid focal should reject a negative gamma")
+  assert_true(tostring(gamma_error):find("gamma", 1, true) ~= nil)
+  local invalid_padding = pcall(tfa.image.median_filter2d, graph, input,
+    { padding = "WRAP" })
+  assert_true(not invalid_padding,
+    "median_filter2d should reject unsupported padding")
+  local invalid_depth = pcall(tfa.layers.stochastic_depth, graph, input, input,
+    { survival_probability = 2 })
+  assert_true(not invalid_depth,
+    "stochastic depth should reject survival_probability outside [0, 1]")
+end)
+
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
   passed + failed, passed, failed))
 if #failures > 0 then

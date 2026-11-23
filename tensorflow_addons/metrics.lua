@@ -435,6 +435,70 @@ end
 
 Metrics.MeanIoU = Metrics.mean_iou
 
+local function binary_matrix(graph, tensor, options, name)
+  local dtype = tensor_dtype(tensor, options.dtype or "float32")
+  local value = tensor
+  if options.from_logits == true then
+    value = tf.nn.sigmoid(graph, value, name .. "/sigmoid", dtype)
+  end
+  if options.threshold ~= nil then
+    local threshold = tf.constant(graph, options.threshold,
+      name .. "/threshold", dtype)
+    local positive = Ops.greater(graph, value, threshold,
+      name .. "/greater", dtype)
+    return tf.cast(graph, positive, "bool", "float32", name .. "/binary")
+  end
+  return tf.cast(graph, value, dtype, "float32", name .. "/binary")
+end
+
+-- Multilabel confusion matrix, matching tfa.metrics.MultiLabelConfusionMatrix.
+-- Returns a [num_classes, 2, 2] tensor whose rows are [true label] and columns
+-- are [predicted label], so each class matrix is [[TN, FP], [FN, TP]].
+function Metrics.multilabel_confusion_matrix(graph, predictions, labels,
+    num_classes, options)
+  if type(num_classes) == "table" and options == nil then
+    options = num_classes
+    num_classes = options.num_classes
+  end
+  options = options or {}
+  local name = options.name or "multilabel_confusion_matrix"
+  if num_classes == nil then num_classes = options.num_classes end
+  validate_num_classes(num_classes, name)
+  local predicted = binary_matrix(graph, predictions, options,
+    name .. "/predictions")
+  local truth = binary_matrix(graph, labels, options, name .. "/labels")
+  local one = tf.constant(graph, 1, name .. "/one", "float32")
+  local true_positive = tf.reduce_sum(graph, tf.mul(graph, truth, predicted,
+    name .. "/true_positive_tensor", "float32"), { 0 },
+    name .. "/true_positive", "float32", false)
+  local predicted_sum = tf.reduce_sum(graph, predicted, { 0 },
+    name .. "/predicted_sum", "float32", false)
+  local truth_sum = tf.reduce_sum(graph, truth, { 0 },
+    name .. "/truth_sum", "float32", false)
+  local false_positive = tf.sub(graph, predicted_sum, true_positive,
+    name .. "/false_positive", "float32")
+  local false_negative = tf.sub(graph, truth_sum, true_positive,
+    name .. "/false_negative", "float32")
+  local truth_negative = tf.sub(graph, one, truth,
+    name .. "/truth_negative", "float32")
+  local predicted_negative = tf.sub(graph, one, predicted,
+    name .. "/predicted_negative", "float32")
+  local true_negative = tf.reduce_sum(graph, tf.mul(graph, truth_negative,
+    predicted_negative, name .. "/true_negative_tensor", "float32"), { 0 },
+    name .. "/true_negative", "float32", false)
+  local components = { true_negative, false_positive, false_negative,
+    true_positive }
+  local columns = {}
+  for index = 1, #components do
+    columns[index] = tf.expand_dims(graph, components[index], 1,
+      name .. "/component_" .. index, "float32")
+  end
+  local flat = tf.concat(graph, columns, 1, name .. "/flat", "float32")
+  return tf.reshape(graph, flat, { num_classes, 2, 2 }, name, "float32")
+end
+
+Metrics.MultiLabelConfusionMatrix = Metrics.multilabel_confusion_matrix
+
 function Metrics.cohen_kappa(graph, predictions, labels, options)
   if not is_graph_tensor(labels) then
     if options == nil then options = labels end
