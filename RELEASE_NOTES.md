@@ -1,11 +1,11 @@
-# tensorflow-lua-addons 0.10.0
+# tensorflow-lua-addons 0.11.0
 
-- LazyAdam optimizer with lazy updates for zero-gradient elements;
-- stable log-cosh loss with `none`, `mean`, and `sum` reductions;
-- mean IoU metric for integer and one-hot class inputs;
-- `gaussian_filter2d` image helper with reflect, symmetric, constant, same, and
-  valid padding;
-- Maxout layer with last-axis and arbitrary-axis support;
-- multiclass F1 and Cohen's kappa metrics;
-- Poisson and quantization layers registered at module load time;
-- 42 graph-mode tests.
+- pinball/quantile loss with `none`, `mean`, and `sum` reductions;
+- sigmoid focal cross entropy with `alpha`, `gamma`, `from_logits`, and
+  reduction options;
+- multilabel confusion matrix metric with per-class `[[TN, FP], [FN, TP]]`
+  matrices;
+- `median_filter2d` for rank-2, rank-3, and rank-4 images, including even filter
+  sizes;
+- stochastic depth layer with training/inference and seeded Bernoulli behavior;
+- 49 graph-mode tests.
