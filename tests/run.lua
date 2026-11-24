@@ -1827,6 +1827,127 @@ test("rotate matches identity and quarter-turn transforms", function()
   session:close()
 end)
 
+test("Poincare normalization projects vectors into the unit ball", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 3, 2 }, "poincare_input")
+  local layer = tfa.layers.poincare_normalize(graph, input,
+    { axis = 1, epsilon = 1e-5, name = "poincare" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = {
+    { 3, 4 },
+    { 0.1, 0.2 },
+    { 0, 0 },
+  } }, { layer.output })[1]:totable()
+  local boundary = 1 - 1e-5
+  near(values[1][1], boundary * 3 / 5, 1e-6, "Poincare first coordinate")
+  near(values[1][2], boundary * 4 / 5, 1e-6, "Poincare second coordinate")
+  near(values[2][1], 0.1, 1e-6, "Poincare inside ball first")
+  near(values[2][2], 0.2, 1e-6, "Poincare inside ball second")
+  near(values[3][1], 0, 0, "Poincare zero vector first")
+  near(values[3][2], 0, 0, "Poincare zero vector second")
+  assert_true(tfa.layers.PoincareNormalize ==
+    tfa.layers.poincare_normalize)
+  session:close()
+end)
+
+test("bilinear_resize interpolates rank-4 images", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "bilinear_input")
+  local resized = tfa.image.bilinear_resize(graph, input, 2, 2,
+    "bilinear_resize", { half_pixel_centers = false })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, { resized })[1]:totable()[1]
+  assert_eq(table.concat({ #values, #values[1], #values[1][1] }, ","),
+    "2,2,1")
+  near(values[1][1][1], 1, 0, "bilinear top-left")
+  near(values[1][2][1], 3, 0, "bilinear top-right")
+  near(values[2][1][1], 9, 0, "bilinear bottom-left")
+  near(values[2][2][1], 11, 0, "bilinear bottom-right")
+  assert_true(tfa.image.BilinearResize == tfa.image.bilinear_resize)
+  session:close()
+end)
+
+test("area_resize averages source pixels", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "area_input")
+  local resized = tfa.image.area_resize(graph, input, 2, 2, "area_resize")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, { resized })[1]:totable()[1]
+  assert_eq(table.concat({ #values, #values[1], #values[1][1] }, ","),
+    "2,2,1")
+  near(values[1][1][1], 3.5, 1e-6, "area top-left")
+  near(values[1][2][1], 5.5, 1e-6, "area top-right")
+  near(values[2][1][1], 11.5, 1e-6, "area bottom-left")
+  near(values[2][2][1], 13.5, 1e-6, "area bottom-right")
+  assert_true(tfa.image.AreaResize == tfa.image.area_resize)
+  session:close()
+end)
+
+test("adjust_saturation scales HSV saturation", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 2, 3 },
+    "saturation_input")
+  local grayscale = tfa.image.adjust_saturation(graph, input, 0, "sat_zero")
+  local identity = tfa.image.adjust_saturation(graph, input, 1, "sat_one")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { { {
+    { 1, 0, 0 }, { 0.2, 0.4, 0.8 },
+  } } } }, { grayscale, identity })
+  local gray = values[1]:totable()[1][1]
+  local original = values[2]:totable()[1][1]
+  near(gray[1][1], 1, 1e-6, "red saturation zero")
+  near(gray[1][2], 1, 1e-6, "red saturation zero green")
+  near(gray[1][3], 1, 1e-6, "red saturation zero blue")
+  near(gray[2][1], 0.8, 1e-6, "mixed saturation zero")
+  near(gray[2][2], 0.8, 1e-6, "mixed saturation zero green")
+  near(gray[2][3], 0.8, 1e-6, "mixed saturation zero blue")
+  near(original[2][1], 0.2, 1e-6, "saturation one red")
+  near(original[2][2], 0.4, 1e-6, "saturation one green")
+  near(original[2][3], 0.8, 1e-6, "saturation one blue")
+  assert_true(tfa.image.AdjustSaturation == tfa.image.adjust_saturation)
+  session:close()
+end)
+
+test("MovingAverage tracks and assigns averaged weights", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1, 2 } }, "ma_weight",
+    { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 0.1, 0.1 } }, "ma_gradient",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "ma_weighted", "float32"), { 0, 1 }, "ma_loss", "float32")
+  local optimizer = tfa.optimizers.MovingAverage("gradient_descent",
+    { learning_rate = 1, average_decay = 0.5, name = "moving_average" })
+  local targets, gradients, state = optimizer(graph, loss, { weight })
+  assert_eq(#targets, 3)
+  assert_eq(#gradients, 1)
+  assert_eq(#state.average_variables, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  session:run({}, {}, targets)
+  local fast = session:run({}, { weight.read })[1]:totable()[1]
+  near(fast[1], 0.8, 1e-6, "moving average fast first")
+  near(fast[2], 1.8, 1e-6, "moving average fast second")
+  session:run({}, {}, state.assign_averages)
+  local averaged = session:run({}, { weight.read })[1]:totable()[1]
+  near(averaged[1], 0.875, 1e-6, "moving average assigned first")
+  near(averaged[2], 1.875, 1e-6, "moving average assigned second")
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -1945,6 +2066,30 @@ test("new parity options reject invalid values", function()
   local invalid_angle = pcall(tfa.image.rotate, graph, input, { "bad" })
   assert_true(not invalid_angle,
     "rotate should reject non-numeric angles")
+  local invalid_poincare = pcall(tfa.layers.poincare_normalize, graph, input,
+    { epsilon = 1 })
+  assert_true(not invalid_poincare,
+    "poincare_normalize should reject epsilon outside (0, 1)")
+  local invalid_bilinear = pcall(tfa.image.bilinear_resize, graph, input, 0,
+    2)
+  assert_true(not invalid_bilinear,
+    "bilinear_resize should reject non-positive sizes")
+  local invalid_area = pcall(tfa.image.area_resize, graph, input, 2, 2,
+    "invalid_area", { dtype = "int32" })
+  assert_true(not invalid_area,
+    "area_resize should reject integer images")
+  local invalid_saturation = pcall(tfa.image.adjust_saturation, graph, input,
+    -1)
+  assert_true(not invalid_saturation,
+    "adjust_saturation should reject negative saturation")
+  local invalid_decay = pcall(tfa.optimizers.MovingAverage,
+    "gradient_descent", { average_decay = 1.5 })
+  assert_true(not invalid_decay,
+    "MovingAverage should reject average_decay outside [0, 1]")
+  local invalid_start = pcall(tfa.optimizers.MovingAverage,
+    "gradient_descent", { start_step = 1.5 })
+  assert_true(not invalid_start,
+    "MovingAverage should reject non-integer start steps")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

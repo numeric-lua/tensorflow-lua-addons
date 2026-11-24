@@ -717,4 +717,52 @@ end
 
 Layers.NoisyDense = Layers.noisy_dense
 
+local function rsqrt(graph, input, name, dtype)
+  local desc = graph:new_operation("Rsqrt", name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+-- Project vectors into the Poincare ball with norm <= 1 - epsilon, following
+-- tfa.layers.PoincareNormalize.  Each slice along options.axis is normalized
+-- independently; slices already inside the ball are unchanged.
+function Layers.poincare_normalize(graph, input, options)
+  options = options or {}
+  local name = options.name or "poincare_normalize"
+  local dtype = options.dtype or input.dtype or "float32"
+  local epsilon = options.epsilon
+  if epsilon == nil then epsilon = 1e-5 end
+  if type(epsilon) ~= "number" or epsilon ~= epsilon or epsilon <= 0 or
+      epsilon >= 1 or epsilon == math.huge then
+    error("poincare_normalize epsilon must be in (0, 1)", 3)
+  end
+  local axis = options.axis
+  if axis == nil then axis = 1 end
+  if type(axis) == "number" then axis = { axis } end
+  if type(axis) ~= "table" or #axis == 0 then
+    error("poincare_normalize axis must be an integer or list", 3)
+  end
+  for _, value in ipairs(axis) do
+    if type(value) ~= "number" or value % 1 ~= 0 then
+      error("poincare_normalize axis entries must be integers", 3)
+    end
+  end
+  local squared = tf.square(graph, input, name .. "/squared", dtype)
+  local square_sum = tf.reduce_sum(graph, squared, axis,
+    name .. "/square_sum", dtype, true)
+  local inverse_norm = rsqrt(graph, square_sum, name .. "/inverse_norm", dtype)
+  local boundary = tf.constant(graph, 1 - epsilon, name .. "/boundary", dtype)
+  local scale = Ops.minimum(graph, tf.mul(graph, inverse_norm, boundary,
+    name .. "/scaled_inverse_norm", dtype), tf.constant(graph, 1,
+    name .. "/one", dtype), name .. "/scale", dtype)
+  return {
+    output = tf.mul(graph, input, scale, name .. "/output", dtype),
+    axis = axis,
+    epsilon = epsilon,
+  }
+end
+
+Layers.PoincareNormalize = Layers.poincare_normalize
+
 return Layers

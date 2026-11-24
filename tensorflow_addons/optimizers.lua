@@ -699,6 +699,204 @@ function Optimizers.ConditionalGradient(graph, loss, variables, options)
   }
 end
 
+local function validate_average_decay(value)
+  if type(value) ~= "number" or value ~= value or value < 0 or value > 1 then
+    error("MovingAverage average_decay must be in [0, 1]", 3)
+  end
+  return value
+end
+
+local function validate_start_step(value)
+  if type(value) ~= "number" or value ~= value or value % 1 ~= 0 or value < 0
+      or value == math.huge then
+    error("MovingAverage start_step must be a non-negative integer", 3)
+  end
+  return value
+end
+
+local function split_average_options(options)
+  local config, base_options = {}, {}
+  local wrapper_keys = {
+    average_decay = true,
+    start_step = true,
+    dynamic_decay = true,
+    num_updates = true,
+    name = true,
+    base_name = true,
+    base_options = true,
+    base_optimizer = true,
+    base = true,
+    optimizer = true,
+  }
+  for key, value in pairs(options or {}) do
+    if wrapper_keys[key] then
+      config[key] = value
+    else
+      base_options[key] = value
+    end
+  end
+  return config, base_options
+end
+
+-- Moving-average optimizer wrapper, following tfa.optimizers.MovingAverage.
+-- The base optimizer updates the fast variables; after each step a shadow
+-- average tracks them with the configured decay.  Returned state includes the
+-- average variables and `assign_averages` targets for evaluating or saving
+-- the averaged weights.
+function Optimizers.MovingAverage(base_optimizer, options)
+  if type(base_optimizer) == "table" and not is_callable(base_optimizer) and
+      options == nil then
+    local config = base_optimizer
+    base_optimizer = config.base_optimizer or config.base or config.optimizer
+    options = config
+  end
+  base_optimizer = resolve_optimizer(base_optimizer)
+  if not is_callable(base_optimizer) then
+    error("MovingAverage expects a callable base optimizer or optimizer name",
+      2)
+  end
+  local config, factory_base_options = split_average_options(options)
+  config.average_decay = validate_average_decay(config.average_decay or 0.99)
+  config.start_step = validate_start_step(config.start_step or 0)
+  config.dynamic_decay = config.dynamic_decay == true
+  config.name = config.name or "MovingAverage"
+  config.base_name = config.base_name or (config.name .. "_base")
+  if config.num_updates ~= nil then
+    local updates = config.num_updates
+    if type(updates) ~= "number" or updates % 1 ~= 0 or updates < 0 then
+      error("MovingAverage num_updates must be a non-negative integer", 3)
+    end
+    config.average_decay = math.min(config.average_decay,
+      (1 + updates) / (10 + updates))
+  end
+  local base_options = merge_tables(factory_base_options, config.base_options)
+  if base_options.name == nil then base_options.name = config.base_name end
+
+  return function(graph, loss, variables, call_options)
+    call_options = call_options or {}
+    local call_config, call_base_options = split_average_options(call_options)
+    local average_decay = validate_average_decay(
+      call_config.average_decay or config.average_decay)
+    local start_step = validate_start_step(
+      call_config.start_step or config.start_step)
+    local dynamic_decay = call_config.dynamic_decay
+    if dynamic_decay == nil then dynamic_decay = config.dynamic_decay end
+    local name = call_config.name or config.name
+    local base_name = call_config.base_name or config.base_name
+    if type(variables) ~= "table" or #variables == 0 then
+      error("MovingAverage expects a non-empty variable list", 3)
+    end
+
+    local options_for_base = merge_tables(base_options, call_base_options,
+      call_config.base_options)
+    if options_for_base.name == nil then options_for_base.name = base_name end
+    local base_targets, base_gradients, base_state =
+      base_optimizer(graph, loss, variables, options_for_base)
+    if base_targets == nil then
+      error("base optimizer returned no update targets", 3)
+    end
+    if type(base_targets) ~= "table" or base_targets.oper ~= nil then
+      base_targets = { base_targets }
+    end
+    if base_gradients == nil then base_gradients = {} end
+
+    local initializers, state_variables, average_variables = {}, {}, {}
+    if type(base_state) == "table" then
+      append(initializers, base_state.initializers)
+      append(state_variables, base_state.variables)
+    end
+    local step = Train.variable(graph, 0, name .. "/iterations",
+      { dtype = "int32" })
+    initializers[#initializers + 1] = step.initializer
+    state_variables[#state_variables + 1] = step
+    local one = tf.constant(graph, 1, name .. "/step_one", "int32")
+    local start = tf.constant(graph, start_step, name .. "/start_step",
+      "int32")
+    local started = tf.greater_equal(graph, step.read, start,
+      name .. "/started", "int32")
+    local dtype = variables[1].dtype or "float32"
+    local decay_float = tf.constant(graph, average_decay,
+      name .. "/average_decay", dtype)
+    local candidate_decay = decay_float
+    if dynamic_decay then
+      local step_float = tf.cast(graph, step.read, "int32", dtype,
+        name .. "/step_float")
+      local start_float = tf.constant(graph, start_step, name .. "/start_float",
+        dtype)
+      local count = tf.sub(graph, step_float, start_float,
+        name .. "/step_count", dtype)
+      local numerator = tf.add(graph, tf.constant(graph, 1,
+        name .. "/one_float", dtype), count, name .. "/decay_numerator", dtype)
+      local denominator = tf.add(graph, tf.constant(graph, 10,
+        name .. "/ten_float", dtype), count, name .. "/decay_denominator",
+        dtype)
+      candidate_decay = Ops.minimum(graph, decay_float, tf.div(graph,
+        numerator, denominator, name .. "/dynamic_decay", dtype),
+        name .. "/candidate_decay", dtype)
+    end
+    local decay = graph_select(graph, started, candidate_decay,
+      tf.constant(graph, 0, name .. "/zero_decay", dtype),
+      name .. "/resolved_decay", dtype)
+    local average_factor = tf.sub(graph, tf.constant(graph, 1,
+      name .. "/one_decay", dtype), decay, name .. "/average_factor", dtype)
+    local average_targets = {}
+    local assign_averages = {}
+    for index, variable in ipairs(variables) do
+      local ref = variable.ref or variable
+      local var_dtype = variable.dtype or dtype
+      local shape = variable.shape or { }
+      local average = Train.variable(graph, zeros(shape),
+        name .. "/average_" .. index, { dtype = var_dtype })
+      local init_controls = { average.initializer }
+      if variable.initializer ~= nil then
+        init_controls[#init_controls + 1] = variable.initializer
+      end
+      local initial_fast = read_value(graph, ref,
+        name .. "/average_initial_value_" .. index, var_dtype, init_controls)
+      local average_init = assign(graph, average.ref, initial_fast,
+        name .. "/average_initializer_" .. index, var_dtype)
+      average.initializer = average_init
+      average_variables[index] = average
+      initializers[#initializers + 1] = average_init
+      state_variables[#state_variables + 1] = average
+      local fast_after = read_value(graph, ref, name .. "/fast_after_" .. index,
+        var_dtype, base_targets)
+      local average_before = read_value(graph, average.ref,
+        name .. "/average_before_" .. index, var_dtype)
+      local next_average = tf.add(graph, tf.mul(graph, average_before, decay,
+        name .. "/decayed_average_" .. index, var_dtype), tf.mul(graph,
+        fast_after, average_factor, name .. "/fast_average_" .. index,
+        var_dtype), name .. "/next_average_" .. index, var_dtype)
+      local average_assign = assign(graph, average.ref, next_average,
+        name .. "/average_assign_" .. index, var_dtype, base_targets)
+      average_targets[#average_targets + 1] = average_assign
+      assign_averages[index] = assign(graph, ref, average.read,
+        name .. "/assign_average_" .. index, var_dtype)
+    end
+    local next_step = tf.add(graph, step.read, one, name .. "/next_step",
+      "int32")
+    local step_assign = assign(graph, step.ref, next_step,
+      name .. "/increment_iterations", "int32", average_targets)
+    local targets = {}
+    append(targets, base_targets)
+    append(targets, average_targets)
+    targets[#targets + 1] = step_assign
+    return targets, base_gradients, {
+      initializers = initializers,
+      variables = state_variables,
+      average_variables = average_variables,
+      average_weights = average_variables,
+      assign_averages = assign_averages,
+      step = step,
+      average_decay = average_decay,
+      dynamic_decay = dynamic_decay,
+      start_step = start_step,
+      base_optimizer = base_optimizer,
+      base_state = base_state,
+    }
+  end
+end
+
 -- Decoupled weight-decay wrapper.  The base optimizer is responsible for
 -- applying the decay (the core Adam/SGD implementations support weight_decay).
 function Optimizers.WeightDecay(base_optimizer, options)

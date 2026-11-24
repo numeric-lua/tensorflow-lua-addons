@@ -27,6 +27,32 @@ function Image.adjust_brightness(graph, input, delta, name)
   return value
 end
 
+-- Adjust color saturation, following tf.image.adjust_saturation.  The op works
+-- per RGB pixel; saturation 0 produces grayscale and 1 preserves the input.
+function Image.adjust_saturation(graph, input, saturation, name)
+  name = name or "adjust_saturation"
+  local dtype = input.dtype or "float32"
+  if type(saturation) ~= "number" or saturation ~= saturation or
+      saturation < 0 or saturation == math.huge then
+    error("adjust_saturation requires a finite non-negative saturation", 3)
+  end
+  local desc = graph:new_operation("AdjustSaturation", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, saturation, name .. "/scale", "float32"))
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+Image.AdjustSaturation = Image.adjust_saturation
+
+local function validate_resize_dimensions(height, width, name)
+  for _, value in ipairs({ height, width }) do
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+      error(name .. " height and width must be positive integers", 3)
+    end
+  end
+end
+
 function Image.resize_nearest(graph, input, height, width, name)
   name = name or "resize_nearest"
   local dtype = input.dtype or "float32"
@@ -38,6 +64,47 @@ function Image.resize_nearest(graph, input, height, width, name)
   desc:set_string("align_corners", "false")
   return desc:finish()
 end
+
+-- Bilinear resize for rank-4 NHWC images.  Half-pixel centers match
+-- tf.image.resize(..., method="bilinear") by default.
+function Image.bilinear_resize(graph, input, height, width, name, options)
+  options = options or {}
+  name = name or "bilinear_resize"
+  local dtype = options.dtype or input.dtype or "float32"
+  validate_resize_dimensions(height, width, name)
+  local desc = graph:new_operation("ResizeBilinear", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, { height, width }, name .. "/size",
+    "int32"))
+  desc:set_type("T", dtype)
+  desc:set_bool("align_corners", options.align_corners == true)
+  desc:set_bool("half_pixel_centers", options.half_pixel_centers ~= false)
+  return desc:finish()
+end
+
+Image.BilinearResize = Image.bilinear_resize
+
+-- Area resize for rank-4 NHWC float images.  Area interpolation averages the
+-- source pixels covered by each destination pixel, matching
+-- tf.image.resize(..., method="area").
+function Image.area_resize(graph, input, height, width, name, options)
+  options = options or {}
+  name = name or "area_resize"
+  local dtype = options.dtype or input.dtype or "float32"
+  if dtype ~= "float32" and dtype ~= "float64" then
+    error(name .. " requires a float32 or float64 input", 3)
+  end
+  validate_resize_dimensions(height, width, name)
+  local desc = graph:new_operation("ResizeArea", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, { height, width }, name .. "/size",
+    "int32"))
+  desc:set_type("T", dtype)
+  desc:set_bool("align_corners", options.align_corners == true)
+  return desc:finish()
+end
+
+Image.AreaResize = Image.area_resize
 
 local function pack_int32(graph, values, name)
   local desc = graph:new_operation("Pack", name)
