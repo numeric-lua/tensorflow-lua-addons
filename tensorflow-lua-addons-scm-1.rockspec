@@ -10,9 +10,9 @@ description = {
   detailed = [[
     Activations, hinge/KL/contrastive/N-pairs losses, AUC and operating-point
     metrics, filter-response and other normalization layers, NoisyDense,
-    stochastic depth, LAMB, NovoGrad, LazyAdam, Lookahead, image filters and
-    translation including Sobel edges, and callbacks built on tensorflow-lua.
-    Requires a local libtensorflow installation.
+    stochastic depth, LAMB, NovoGrad, LazyAdam, ConditionalGradient, Lookahead,
+    image filters, translation, rotation, and color augmentation, and callbacks
+    built on tensorflow-lua. Requires a local libtensorflow installation.
   ]],
   homepage = "https://github.com/numeric-lua/tensorflow-lua-addons",
   license = "BSD-3-Clause",
