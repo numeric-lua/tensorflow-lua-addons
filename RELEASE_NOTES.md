@@ -1,8 +1,8 @@
-# tensorflow-lua-addons 0.15.0
+# tensorflow-lua-addons 0.16.0
 
-- precision-at-recall operating-point metric;
-- recall-at-precision operating-point metric;
-- ConditionalGradient optimizer with the Frobenius-norm constraint;
-- `rotate` image transform with per-image angles and configurable fill modes;
-- random HSV color augmentation in YIQ space with seeded ranges;
-- 70 graph-mode tests.
+- Poincare normalization layer for projecting slices into the unit ball;
+- bilinear image resize with configurable pixel-center and corner alignment;
+- area image resize with source-pixel averaging;
+- HSV saturation adjustment helper for RGB images;
+- MovingAverage optimizer wrapper with averaged-weight assignment targets;
+- 75 graph-mode tests.
