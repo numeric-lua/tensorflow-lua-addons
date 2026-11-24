@@ -566,6 +566,61 @@ end
 
 Metrics.SpecificityAtSensitivity = Metrics.specificity_at_sensitivity
 
+-- Best precision whose operating point has recall >= the requested value,
+-- following tf.keras.metrics.PrecisionAtRecall.
+function Metrics.precision_at_recall(graph, predictions, labels, recall,
+    options)
+  if type(recall) == "table" and options == nil then
+    options = recall
+    recall = options.recall
+  end
+  options = options or {}
+  if recall == nil then recall = options.recall end
+  if not finite_number(recall) or recall < 0 or recall > 1 then
+    error("precision_at_recall recall must be in [0, 1]", 4)
+  end
+  local name = options.name or "precision_at_recall"
+  local dtype = options.dtype or "float32"
+  local thresholds = sensitivity_thresholds(options.num_thresholds, name)
+  local tp, fp, fn = thresholded_counts(graph, predictions, labels,
+    thresholds, options.from_logits == true, name, dtype)
+  local recall_values = true_positive_rate(graph, tp, fn,
+    name .. "/recall", dtype)
+  local precision = Ops.clean_div(graph, tp, tf.add(graph, tp, fp,
+    name .. "/predicted_positive", dtype), name .. "/precision", dtype)
+  return max_under_constraint(graph, recall_values, precision, recall, name,
+    dtype)
+end
+
+Metrics.PrecisionAtRecall = Metrics.precision_at_recall
+
+-- Best recall whose operating point has precision >= the requested value,
+-- following tf.keras.metrics.RecallAtPrecision.
+function Metrics.recall_at_precision(graph, predictions, labels, precision,
+    options)
+  if type(precision) == "table" and options == nil then
+    options = precision
+    precision = options.precision
+  end
+  options = options or {}
+  if precision == nil then precision = options.precision end
+  if not finite_number(precision) or precision < 0 or precision > 1 then
+    error("recall_at_precision precision must be in [0, 1]", 4)
+  end
+  local name = options.name or "recall_at_precision"
+  local dtype = options.dtype or "float32"
+  local thresholds = sensitivity_thresholds(options.num_thresholds, name)
+  local tp, fp, fn = thresholded_counts(graph, predictions, labels,
+    thresholds, options.from_logits == true, name, dtype)
+  local precision_values = Ops.clean_div(graph, tp, tf.add(graph, tp, fp,
+    name .. "/predicted_positive", dtype), name .. "/precision", dtype)
+  local recall = true_positive_rate(graph, tp, fn, name .. "/recall", dtype)
+  return max_under_constraint(graph, precision_values, recall, precision, name,
+    dtype)
+end
+
+Metrics.RecallAtPrecision = Metrics.recall_at_precision
+
 function Metrics.fbeta_score(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "fbeta_score"

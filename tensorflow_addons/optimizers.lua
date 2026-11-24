@@ -619,6 +619,86 @@ function Optimizers.Lookahead(base_optimizer, options, direct_loss,
   end
 end
 
+local function finite_nonnegative(value, label)
+  if type(value) ~= "number" or value ~= value or value < 0 or
+      value == math.huge then
+    error(label .. " must be a finite non-negative number", 4)
+  end
+  return value
+end
+
+-- Conditional gradient (Frank-Wolfe) optimizer with the Frobenius-norm
+-- constraint used by tfa.optimizers.ConditionalGradient.  Each variable is
+-- updated as lr * variable - (1 - lr) * lambda * gradient / (||gradient|| + eps).
+function Optimizers.ConditionalGradient(graph, loss, variables, options)
+  options = options or {}
+  if type(variables) ~= "table" or #variables == 0 then
+    error("ConditionalGradient expects a non-empty variable list", 3)
+  end
+  local learning_rate = options.learning_rate or options.lr or 0.001
+  local lambda = options.lambda_ or options.lambda or 0.01
+  local epsilon = options.epsilon or 1e-7
+  local ord = options.ord or "fro"
+  if ord ~= "fro" then
+    error("ConditionalGradient currently supports ord = 'fro'", 3)
+  end
+  finite_nonnegative(learning_rate, "ConditionalGradient learning_rate")
+  finite_nonnegative(lambda, "ConditionalGradient lambda")
+  if type(epsilon) ~= "number" or epsilon ~= epsilon or epsilon <= 0 or
+      epsilon == math.huge then
+    error("ConditionalGradient epsilon must be a finite positive number", 3)
+  end
+  local name = options.name or "ConditionalGradient"
+  local refs = {}
+  for index, variable in ipairs(variables) do
+    refs[index] = variable.ref or variable
+  end
+  local gradients = options.gradients or tf.gradients(graph, { loss }, refs)
+  local dtype = variables[1].dtype or "float32"
+  local lr = tf.constant(graph, learning_rate, name .. "/learning_rate", dtype)
+  local lambda_op = tf.constant(graph, lambda, name .. "/lambda", dtype)
+  local epsilon_op = tf.constant(graph, epsilon, name .. "/epsilon", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local one_minus_lr = tf.sub(graph, one, lr, name .. "/one_minus_lr", dtype)
+  local targets = {}
+
+  for index, variable in ipairs(variables) do
+    local ref = variable.ref or variable
+    local var_dtype = variable.dtype or dtype
+    local gradient = gradients[index]
+    if gradient == nil then
+      error("ConditionalGradient received no gradient for variable " .. index, 3)
+    end
+    local squared = tf.square(graph, gradient, name .. "/squared_" .. index,
+      var_dtype)
+    local norm = tf.sqrt(graph, Ops.sum_all(graph, squared,
+      name .. "/norm_squared_" .. index, var_dtype), name .. "/norm_" .. index,
+      var_dtype)
+    local denominator = tf.add(graph, norm, epsilon_op,
+      name .. "/denominator_" .. index, var_dtype)
+    local direction = tf.div(graph, gradient, denominator,
+      name .. "/direction_" .. index, var_dtype)
+    local decayed = tf.mul(graph, variable.read, lr,
+      name .. "/decayed_" .. index, var_dtype)
+    local step = tf.mul(graph, tf.mul(graph, one_minus_lr, lambda_op,
+      name .. "/constraint_" .. index, var_dtype), direction,
+      name .. "/step_" .. index, var_dtype)
+    local next_weight = tf.sub(graph, decayed, step,
+      name .. "/next_weight_" .. index, var_dtype)
+    targets[#targets + 1] = assign(graph, ref, next_weight,
+      name .. "/weight_assign_" .. index, var_dtype)
+  end
+
+  return targets, gradients, {
+    initializers = {},
+    variables = {},
+    learning_rate = lr,
+    lambda = lambda_op,
+    epsilon = epsilon_op,
+    ord = ord,
+  }
+end
+
 -- Decoupled weight-decay wrapper.  The base optimizer is responsible for
 -- applying the decay (the core Adam/SGD implementations support weight_decay).
 function Optimizers.WeightDecay(base_optimizer, options)

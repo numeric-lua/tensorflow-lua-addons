@@ -252,6 +252,45 @@ local function from_4d_image(graph, input, rank, name, dtype)
   return input
 end
 
+local function apply_projective_transform(graph, image, transforms,
+    interpolation, fill_mode, fill_value, name, dtype)
+  local shape = tf.shape(graph, image, name .. "/transform_shape", dtype)
+  local output_shape = tf.slice(graph, shape, { 1 }, { 2 },
+    name .. "/output_shape", "int32")
+  local desc = graph:new_operation("ImageProjectiveTransformV3",
+    name .. "/transform")
+  desc:add_input(image)
+  desc:add_input(transforms)
+  desc:add_input(output_shape)
+  desc:add_input(tf.constant(graph, fill_value, name .. "/fill_value",
+    "float32"))
+  desc:set_type("dtype", dtype)
+  desc:set_string("interpolation", interpolation)
+  desc:set_string("fill_mode", fill_mode)
+  return desc:finish()
+end
+
+local function random_uniform_scalar(graph, minimum, maximum, name, dtype,
+    seed, seed2)
+  local desc = graph:new_operation("RandomUniform", name .. "/unit")
+  desc:add_input(tf.constant(graph, {}, name .. "/shape", "int32"))
+  desc:set_type("dtype", dtype)
+  desc:set_int("seed", seed or 0)
+  desc:set_int("seed2", seed2 or 0)
+  local unit = desc:finish()
+  local scaled = tf.mul(graph, unit, tf.constant(graph, maximum - minimum,
+    name .. "/range", dtype), name .. "/scaled", dtype)
+  return tf.add(graph, scaled, tf.constant(graph, minimum,
+    name .. "/minimum", dtype), name, dtype)
+end
+
+local function trig(graph, operation, input, name, dtype)
+  local desc = graph:new_operation(operation, name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
 local function reshape_dynamic(graph, input, shape, name, dtype)
   local desc = graph:new_operation("Reshape", name)
   desc:add_input(input)
@@ -514,24 +553,220 @@ function Image.translate(graph, input, translations, options)
     error(name .. " fill_mode must be constant, reflect, wrap, or nearest", 3)
   end
   local image = to_4d_image(graph, input, rank, name .. "/image", dtype)
-  local shape = tf.shape(graph, image, name .. "/shape", dtype)
-  local output_shape = tf.slice(graph, shape, { 1 }, { 2 },
-    name .. "/output_shape", "int32")
   local transforms = tf.constant(graph, rows, name .. "/transforms", "float32")
-  local desc = graph:new_operation("ImageProjectiveTransformV3",
-    name .. "/transform")
-  desc:add_input(image)
-  desc:add_input(transforms)
-  desc:add_input(output_shape)
-  desc:add_input(tf.constant(graph, fill_value, name .. "/fill_value",
-    "float32"))
-  desc:set_type("dtype", dtype)
-  desc:set_string("interpolation", interpolation)
-  desc:set_string("fill_mode", fill_mode)
-  local output = desc:finish()
+  local output = apply_projective_transform(graph, image, transforms,
+    interpolation, fill_mode, fill_value, name, dtype)
   return from_4d_image(graph, output, rank, name, dtype)
 end
 
 Image.Translate = Image.translate
+
+local function validate_transform_mode(interpolation, fill_mode, name)
+  if interpolation ~= "NEAREST" and interpolation ~= "BILINEAR" then
+    error(name .. " interpolation must be 'nearest' or 'bilinear'", 3)
+  end
+  if fill_mode ~= "CONSTANT" and fill_mode ~= "REFLECT" and
+      fill_mode ~= "WRAP" and fill_mode ~= "NEAREST" then
+    error(name .. " fill_mode must be constant, reflect, wrap, or nearest", 3)
+  end
+end
+
+-- Rotate rank-2, rank-3, or rank-4 images counterclockwise by radians,
+-- following tfa.image.rotate.  A scalar angle applies to the whole input; a
+-- list supplies one angle per batch image.
+function Image.rotate(graph, input, angles, options)
+  options = options or {}
+  local name = options.name or "rotate"
+  local dtype = options.dtype or input.dtype or "float32"
+  local rank = options.rank or
+    (type(options.input_shape) == "table" and #options.input_shape) or
+    (type(input.shape) == "table" and #input.shape) or 4
+  if rank ~= 2 and rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-2, rank-3, or rank-4 inputs", 3)
+  end
+  local values
+  if type(angles) == "number" then
+    values = { angles }
+  elseif type(angles) == "table" and #angles > 0 then
+    values = angles
+  else
+    error(name .. " requires an angle or a non-empty list of angles", 3)
+  end
+  for _, angle in ipairs(values) do
+    if type(angle) ~= "number" or angle ~= angle or
+        angle == math.huge or angle == -math.huge then
+      error(name .. " angles must be finite numbers in radians", 3)
+    end
+  end
+  local interpolation = string.upper(options.interpolation or "nearest")
+  local fill_mode = string.upper(options.fill_mode or "constant")
+  validate_transform_mode(interpolation, fill_mode, name)
+  local fill_value = options.fill_value or 0
+  if type(fill_value) ~= "number" or fill_value ~= fill_value or
+      fill_value == math.huge or fill_value == -math.huge then
+    error(name .. " fill_value must be a finite number", 3)
+  end
+  local image = to_4d_image(graph, input, rank, name .. "/image", dtype)
+  local shape = tf.shape(graph, image, name .. "/shape", dtype)
+  local function dimension(index, label)
+    return tf.cast(graph, tf.gather(graph, shape,
+      tf.constant(graph, index, name .. "/" .. label .. "_index", "int32"), 0,
+      name .. "/" .. label, "int32"), "int32", "float32",
+      name .. "/" .. label .. "_float")
+  end
+  local height = dimension(1, "height")
+  local width = dimension(2, "width")
+  local one = tf.constant(graph, 1, name .. "/one", "float32")
+  local two = tf.constant(graph, 2, name .. "/two", "float32")
+  local zero = tf.constant(graph, 0, name .. "/zero", "float32")
+  local negative_one = tf.constant(graph, -1, name .. "/negative_one",
+    "float32")
+  local width_minus_one = tf.sub(graph, width, one,
+    name .. "/width_minus_one", "float32")
+  local height_minus_one = tf.sub(graph, height, one,
+    name .. "/height_minus_one", "float32")
+  local rows = {}
+  for index, angle in ipairs(values) do
+    local cosine = tf.constant(graph, math.cos(angle),
+      name .. "/cos_" .. index, "float32")
+    local sine = tf.constant(graph, math.sin(angle),
+      name .. "/sin_" .. index, "float32")
+    local negative_sine = tf.mul(graph, negative_one, sine,
+      name .. "/negative_sine_" .. index, "float32")
+    local x_offset = tf.div(graph, tf.sub(graph, width_minus_one,
+      tf.sub(graph, tf.mul(graph, cosine, width_minus_one,
+        name .. "/cos_width_" .. index, "float32"), tf.mul(graph, sine,
+        height_minus_one, name .. "/sin_height_" .. index, "float32"),
+        name .. "/rotated_width_" .. index, "float32"),
+      name .. "/width_delta_" .. index, "float32"), two,
+      name .. "/x_offset_" .. index, "float32")
+    local y_offset = tf.div(graph, tf.sub(graph, height_minus_one,
+      tf.add(graph, tf.mul(graph, sine, width_minus_one,
+        name .. "/sin_width_" .. index, "float32"), tf.mul(graph, cosine,
+        height_minus_one, name .. "/cos_height_" .. index, "float32"),
+        name .. "/rotated_height_" .. index, "float32"),
+      name .. "/height_delta_" .. index, "float32"), two,
+      name .. "/y_offset_" .. index, "float32")
+    rows[index] = tf.stack(graph, {
+      cosine, negative_sine, x_offset, sine, cosine, y_offset, zero, zero,
+    }, 0, name .. "/row_" .. index, "float32")
+  end
+  local transforms
+  if #rows == 1 then
+    transforms = tf.reshape(graph, rows[1], { 1, 8 },
+      name .. "/transforms", "float32")
+  else
+    transforms = tf.stack(graph, rows, 0, name .. "/transforms", "float32")
+  end
+  local output = apply_projective_transform(graph, image, transforms,
+    interpolation, fill_mode, fill_value, name, dtype)
+  return from_4d_image(graph, output, rank, name, dtype)
+end
+
+Image.Rotate = Image.rotate
+
+-- Random HSV adjustment in YIQ space, following tfa.image.random_hsv_in_yiq.
+-- The image is adjusted with a hue delta in [-max_delta_hue, max_delta_hue]
+-- radians and saturation/value scales drawn from the supplied ranges.
+function Image.random_hsv_in_yiq(graph, input, options)
+  options = options or {}
+  local name = options.name or "random_hsv_in_yiq"
+  local dtype = options.dtype or input.dtype or "float32"
+  if dtype ~= "float32" and dtype ~= "float64" then
+    error(name .. " requires a float32 or float64 input", 3)
+  end
+  local rank = options.rank or
+    (type(options.input_shape) == "table" and #options.input_shape) or
+    (type(input.shape) == "table" and #input.shape) or 4
+  if rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-3 or rank-4 RGB inputs", 3)
+  end
+  if type(options.input_shape) == "table" and
+      options.input_shape[#options.input_shape] ~= 3 then
+    error(name .. " requires a last dimension of 3", 3)
+  end
+  local max_delta_hue = options.max_delta_hue or 0
+  local lower_saturation = options.lower_saturation or 1
+  local upper_saturation = options.upper_saturation or 1
+  local lower_value = options.lower_value or 1
+  local upper_value = options.upper_value or 1
+  local function nonnegative(value, label)
+    if type(value) ~= "number" or value ~= value or value < 0 or
+        value == math.huge then
+      error(name .. " " .. label .. " must be a finite non-negative number", 3)
+    end
+    return value
+  end
+  nonnegative(max_delta_hue, "max_delta_hue")
+  nonnegative(lower_saturation, "lower_saturation")
+  nonnegative(upper_saturation, "upper_saturation")
+  nonnegative(lower_value, "lower_value")
+  nonnegative(upper_value, "upper_value")
+  if lower_saturation > upper_saturation then
+    error(name .. " lower_saturation must not exceed upper_saturation", 3)
+  end
+  if lower_value > upper_value then
+    error(name .. " lower_value must not exceed upper_value", 3)
+  end
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local negative_one = tf.constant(graph, -1, name .. "/negative_one", dtype)
+  local delta_hue
+  if max_delta_hue == 0 then
+    delta_hue = zero
+  else
+    delta_hue = random_uniform_scalar(graph, -max_delta_hue, max_delta_hue,
+      name .. "/delta_hue", dtype, options.seed, options.seed2)
+  end
+  local saturation
+  if lower_saturation == upper_saturation then
+    saturation = tf.constant(graph, lower_saturation,
+      name .. "/saturation", dtype)
+  else
+    saturation = random_uniform_scalar(graph, lower_saturation,
+      upper_saturation, name .. "/saturation", dtype, options.seed,
+      options.seed2)
+  end
+  local value
+  if lower_value == upper_value then
+    value = tf.constant(graph, lower_value, name .. "/value", dtype)
+  else
+    value = random_uniform_scalar(graph, lower_value, upper_value,
+      name .. "/value", dtype, options.seed, options.seed2)
+  end
+  local cosine = trig(graph, "Cos", delta_hue, name .. "/cos", dtype)
+  local sine = trig(graph, "Sin", delta_hue, name .. "/sin", dtype)
+  local scaled = tf.mul(graph, value, saturation, name .. "/scaled", dtype)
+  local vsu = tf.mul(graph, scaled, cosine, name .. "/vsu", dtype)
+  local vsw = tf.mul(graph, scaled, sine, name .. "/vsw", dtype)
+  local negative_vsw = tf.mul(graph, negative_one, vsw,
+    name .. "/negative_vsw", dtype)
+  local row_one = tf.stack(graph, { value, zero, zero }, 0,
+    name .. "/row_one", dtype)
+  local row_two = tf.stack(graph, { zero, vsu, vsw }, 0,
+    name .. "/row_two", dtype)
+  local row_three = tf.stack(graph, { zero, negative_vsw, vsu }, 0,
+    name .. "/row_three", dtype)
+  local hsv = tf.stack(graph, { row_one, row_two, row_three }, 0,
+    name .. "/hsv", dtype)
+  local yiq = tf.constant(graph, {
+    { 0.299, 0.596, 0.211 },
+    { 0.587, -0.274, -0.523 },
+    { 0.114, -0.322, 0.312 },
+  }, name .. "/yiq", dtype)
+  local yiq_inverse = tf.constant(graph, {
+    { 1, 1, 1 },
+    { 0.95617069, -0.2726886, -1.103744 },
+    { 0.62143257, -0.64681324, 1.70062309 },
+  }, name .. "/yiq_inverse", dtype)
+  local transform = tf.matmul(graph, tf.matmul(graph, yiq, hsv,
+    name .. "/yiq_hsv", dtype), yiq_inverse, name .. "/transform", dtype)
+  local flat = tf.reshape(graph, input, { -1, 3 }, name .. "/flat", dtype)
+  local transformed = tf.matmul(graph, flat, transform,
+    name .. "/transformed_flat", dtype)
+  local output_shape = tf.shape(graph, input, name .. "/input_shape", dtype)
+  return reshape_dynamic(graph, transformed, output_shape, name, dtype)
+end
+
+Image.RandomHSVInYIQ = Image.random_hsv_in_yiq
 
 return Image

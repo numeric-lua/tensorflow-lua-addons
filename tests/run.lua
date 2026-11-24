@@ -1687,6 +1687,146 @@ test("translate accepts rank-3 images and per-image translations", function()
   session:close()
 end)
 
+test("precision and recall at operating points match Keras examples", function()
+  local graph = tf.Graph.new()
+  local recall_labels = tf.placeholder(graph, "float32", { 5 },
+    "par_labels")
+  local recall_predictions = tf.placeholder(graph, "float32", { 5 },
+    "par_predictions")
+  local precision_labels = tf.placeholder(graph, "float32", { 4 },
+    "rap_labels")
+  local precision_predictions = tf.placeholder(graph, "float32", { 4 },
+    "rap_predictions")
+  local precision = tfa.metrics.precision_at_recall(graph,
+    recall_predictions, recall_labels, 0.5, { name = "par" })
+  local recall = tfa.metrics.recall_at_precision(graph, precision_predictions,
+    precision_labels, { precision = 0.8, name = "rap" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [recall_labels] = { 0, 0, 0, 1, 1 },
+    [recall_predictions] = { 0, 0.3, 0.8, 0.3, 0.8 },
+    [precision_labels] = { 0, 0, 1, 1 },
+    [precision_predictions] = { 0, 0.5, 0.3, 0.9 },
+  }, { precision, recall })
+  near(values[1]:totable(), 0.5, 1e-6, "precision at 0.5 recall")
+  near(values[2]:totable(), 0.5, 1e-6, "recall at 0.8 precision")
+  assert_true(tfa.metrics.PrecisionAtRecall ==
+    tfa.metrics.precision_at_recall)
+  assert_true(tfa.metrics.RecallAtPrecision ==
+    tfa.metrics.recall_at_precision)
+  session:close()
+end)
+
+test("ConditionalGradient applies the Frobenius-norm update", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1, 2 } }, "cg_weight",
+    { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 0.1, 0.1 } }, "cg_gradient",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "cg_weighted", "float32"), { 0, 1 }, "cg_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.ConditionalGradient(graph,
+    loss, { weight }, { learning_rate = 0.5, lambda_ = 0.01, name = "cg" })
+  assert_eq(#targets, 1)
+  assert_eq(#gradients, 1)
+  assert_eq(#state.initializers, 0)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer })
+  session:run({}, {}, targets)
+  local values = session:run({}, { weight.read })[1]:totable()[1]
+  local norm = math.sqrt(0.1 * 0.1 + 0.1 * 0.1)
+  for index = 1, 2 do
+    local original = index
+    local expected = original * 0.5 - 0.5 * 0.01 * 0.1 / (norm + 1e-7)
+    near(values[index], expected, 1e-6,
+      "conditional gradient value " .. index)
+  end
+  session:close()
+end)
+
+test("random_hsv_in_yiq matches identity and saturation math", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 3 },
+    "hsv_input")
+  local identity = tfa.image.random_hsv_in_yiq(graph, input,
+    { name = "hsv_identity" })
+  local grayscale = tfa.image.random_hsv_in_yiq(graph, input,
+    { lower_saturation = 0, upper_saturation = 0, name = "hsv_gray" })
+  local random = tfa.image.random_hsv_in_yiq(graph, input,
+    { max_delta_hue = 0.25, lower_saturation = 0.8, upper_saturation = 1.2,
+      lower_value = 0.8, upper_value = 1.2, seed = 11, name = "hsv_random" })
+  local pixels = {
+    { { 1, 0, 0 }, { 0, 1, 0 } },
+    { { 0, 0, 1 }, { 1, 1, 1 } },
+  }
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { pixels } },
+    { identity, grayscale, random })
+  local identity_values = values[1]:totable()[1]
+  local gray_values = values[2]:totable()[1]
+  for row = 1, 2 do
+    for column = 1, 2 do
+      local pixel = pixels[row][column]
+      local luminance = 0.299 * pixel[1] + 0.587 * pixel[2] +
+        0.114 * pixel[3]
+      for channel = 1, 3 do
+        near(identity_values[row][column][channel], pixel[channel], 1e-5,
+          "HSV identity")
+        near(gray_values[row][column][channel], luminance, 1e-5,
+          "HSV saturation zero")
+      end
+    end
+  end
+  assert_eq(table.concat(values[3]:shape(), ","), "1,2,2,3")
+  local random_values = values[3]:totable()[1]
+  for row = 1, 2 do
+    for column = 1, 2 do
+      for channel = 1, 3 do
+        local value = random_values[row][column][channel]
+        assert_true(value == value and value ~= math.huge and
+          value ~= -math.huge, "random HSV should stay finite")
+      end
+    end
+  end
+  assert_true(tfa.image.RandomHSVInYIQ == tfa.image.random_hsv_in_yiq)
+  session:close()
+end)
+
+test("rotate matches identity and quarter-turn transforms", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "rotate_input")
+  local batch = tf.placeholder(graph, "float32", { 2, 2, 2, 1 },
+    "rotate_batch")
+  local identity = tfa.image.rotate(graph, input, 0, { name = "rotate_zero" })
+  local quarter = tfa.image.rotate(graph, input, math.pi / 2,
+    { name = "rotate_quarter" })
+  local per_image = tfa.image.rotate(graph, batch, { 0, math.pi / 2 },
+    { name = "rotate_batch" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [input] = { { { { 1 }, { 2 } }, { { 3 }, { 4 } } } },
+    [batch] = {
+      { { { 1 }, { 2 } }, { { 3 }, { 4 } } },
+      { { { 1 }, { 2 } }, { { 3 }, { 4 } } },
+    },
+  }, { identity, quarter, per_image })
+  local expected_identity = { { 1, 2 }, { 3, 4 } }
+  local expected_quarter = { { 2, 4 }, { 1, 3 } }
+  for row = 1, 2 do
+    for column = 1, 2 do
+      near(values[1]:totable()[1][row][column][1],
+        expected_identity[row][column], 0, "identity rotation")
+      near(values[2]:totable()[1][row][column][1],
+        expected_quarter[row][column], 0, "quarter rotation")
+      near(values[3]:totable()[2][row][column][1],
+        expected_quarter[row][column], 0, "batch quarter rotation")
+    end
+  end
+  assert_true(tfa.image.Rotate == tfa.image.rotate)
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -1781,6 +1921,30 @@ test("new parity options reject invalid values", function()
     { 1, 0 }, { rank = 5 })
   assert_true(not invalid_translate_rank,
     "translate should reject unsupported image ranks")
+  local invalid_par = pcall(tfa.metrics.precision_at_recall, graph,
+    predictions, labels, 1.5)
+  assert_true(not invalid_par,
+    "precision_at_recall should reject targets outside [0, 1]")
+  local invalid_rap = pcall(tfa.metrics.recall_at_precision, graph,
+    predictions, labels, -0.1)
+  assert_true(not invalid_rap,
+    "recall_at_precision should reject targets outside [0, 1]")
+  local invalid_ord = pcall(tfa.optimizers.ConditionalGradient, graph, nil,
+    { { ref = input } }, { ord = "l2" })
+  assert_true(not invalid_ord,
+    "ConditionalGradient should reject unsupported norms")
+  local invalid_hsv_shape = pcall(tfa.image.random_hsv_in_yiq, graph, input,
+    { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_hsv_shape,
+    "random_hsv_in_yiq should require three color channels")
+  local invalid_hsv_range = pcall(tfa.image.random_hsv_in_yiq, graph, input,
+    { input_shape = { 1, 3, 3, 3 }, lower_saturation = 2,
+      upper_saturation = 1 })
+  assert_true(not invalid_hsv_range,
+    "random_hsv_in_yiq should reject inverted saturation ranges")
+  local invalid_angle = pcall(tfa.image.rotate, graph, input, { "bad" })
+  assert_true(not invalid_angle,
+    "rotate should reject non-numeric angles")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
