@@ -410,4 +410,57 @@ function Image.mean_filter2d(graph, input, options)
   return from_4d_image(graph, output, rank, name, source_dtype)
 end
 
+-- Sobel edge maps, matching tf.image.sobel_edges.  Inputs are rank-4 NHWC
+-- floating point images.  The result has shape [batch, height, width,
+-- channels, 2], where the final axis is [dy, dx] for each channel.
+function Image.sobel_edges(graph, input, options)
+  options = options or {}
+  local name = options.name or "sobel_edges"
+  local dtype = options.dtype or input.dtype or "float32"
+  if dtype ~= "float32" and dtype ~= "float64" then
+    error(name .. " requires a float32 or float64 input", 3)
+  end
+  if options.input_shape ~= nil then
+    if type(options.input_shape) ~= "table" or #options.input_shape ~= 4 then
+      error(name .. " requires a rank-4 NHWC input", 3)
+    end
+  end
+  local image = input
+  if input.dtype ~= nil and input.dtype ~= dtype then
+    image = tf.cast(graph, input, input.dtype, dtype, name .. "/input")
+  end
+  local dx = {
+    { -1, 0, 1 },
+    { -2, 0, 2 },
+    { -1, 0, 1 },
+  }
+  local dy = {
+    { -1, -2, -1 },
+    { 0, 0, 0 },
+    { 1, 2, 1 },
+  }
+  local kernel_values = {}
+  for row = 1, 3 do
+    kernel_values[row] = {}
+    for column = 1, 3 do
+      kernel_values[row][column] = {
+        { dy[row][column], dx[row][column] },
+      }
+    end
+  end
+  local padded = pad_image(graph, image, {
+    { 0, 0 }, { 1, 1 }, { 1, 1 }, { 0, 0 },
+  }, "REFLECT", 0, name .. "/padded", dtype)
+  local channels = last_dimension(graph, image, name .. "/channels", dtype)
+  local kernel = tf.constant(graph, kernel_values, name .. "/kernel", dtype)
+  kernel = tile_kernel(graph, kernel, channels, name .. "/tiled_kernel", dtype)
+  local output = depthwise_conv(graph, padded, kernel, "VALID",
+    name .. "/conv", dtype)
+  local image_shape = tf.shape(graph, image, name .. "/shape", dtype)
+  local two = tf.constant(graph, { 2 }, name .. "/two", "int32")
+  local shape = tf.concat(graph, { image_shape, two }, 0,
+    name .. "/output_shape", "int32")
+  return reshape_dynamic(graph, output, shape, name, dtype)
+end
+
 return Image

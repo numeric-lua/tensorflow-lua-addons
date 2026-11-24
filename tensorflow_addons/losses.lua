@@ -125,6 +125,80 @@ local function npairs_common(graph, labels, adjacency, name, dtype)
   return softmax_cross_entropy(graph, labels, targets, name, dtype)
 end
 
+-- Binary hinge loss, following the TensorFlow/Keras hinge contract.  Labels
+-- are expected in {-1, 1}; each element is max(0, margin - label * prediction).
+-- The default reduction matches Keras' "sum_over_batch_size": "none", "mean",
+-- and "sum" are also accepted.
+function Losses.hinge(graph, labels, predictions, options)
+  options = options or {}
+  local name = options.name or "hinge_loss"
+  local dtype = options.dtype or "float32"
+  local margin = options.margin
+  if margin == nil then margin = 1 end
+  if type(margin) ~= "number" or margin ~= margin or margin < 0 or
+      margin == math.huge then
+    error("hinge margin must be a finite non-negative number", 4)
+  end
+  labels = tf.cast(graph, labels, labels.dtype or "float32", dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or "float32",
+    dtype, name .. "/predictions")
+  local product = tf.mul(graph, labels, predictions, name .. "/product", dtype)
+  local violation = tf.sub(graph,
+    tf.constant(graph, margin, name .. "/margin", dtype), product,
+    name .. "/violation", dtype)
+  local elementwise = Ops.maximum(graph, violation,
+    tf.constant(graph, 0, name .. "/zero", dtype), name .. "/loss_values",
+    dtype)
+  return reduce_elementwise(graph, elementwise, options, name, dtype,
+    "sum_over_batch_size")
+end
+
+Losses.Hinge = Losses.hinge
+Losses.hinge_loss = Losses.hinge
+
+-- Kullback-Leibler divergence, following Keras' kl_divergence loss.  `labels`
+-- and `predictions` are probability distributions along the last axis; each
+-- example contributes sum(labels * log(labels / predictions)).  Zero labels
+-- contribute zero, and predictions are floored by `options.epsilon` (default
+-- 1e-7) to keep the result finite.
+function Losses.kl_divergence(graph, labels, predictions, options)
+  options = options or {}
+  local name = options.name or "kl_divergence"
+  local dtype = options.dtype or "float32"
+  local epsilon = options.epsilon
+  if epsilon == nil then epsilon = 1e-7 end
+  if type(epsilon) ~= "number" or epsilon ~= epsilon or epsilon <= 0 or
+      epsilon == math.huge then
+    error("kl_divergence epsilon must be a finite positive number", 4)
+  end
+  labels = tf.cast(graph, labels, labels.dtype or "float32", dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or "float32",
+    dtype, name .. "/predictions")
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local positive = Ops.greater(graph, labels, zero, name .. "/positive", dtype)
+  local safe_labels = tf.where(graph, positive, labels, one,
+    name .. "/safe_labels", dtype)
+  local safe_predictions = Ops.maximum(graph, predictions,
+    tf.constant(graph, epsilon, name .. "/epsilon", dtype),
+    name .. "/safe_predictions", dtype)
+  local ratio = tf.div(graph, safe_labels, safe_predictions,
+    name .. "/ratio", dtype)
+  local log_ratio = tf.log(graph, ratio, name .. "/log_ratio", dtype)
+  local terms = tf.mul(graph, safe_labels, log_ratio, name .. "/terms", dtype)
+  local elementwise = tf.where(graph, positive, terms, zero,
+    name .. "/loss_values", dtype)
+  local per_example = tf.reduce_sum(graph, elementwise, { -1 },
+    name .. "/per_example", dtype, false)
+  return reduce_elementwise(graph, per_example, options, name, dtype,
+    "sum_over_batch_size")
+end
+
+Losses.KLDivergence = Losses.kl_divergence
+Losses.kl_divergence_loss = Losses.kl_divergence
+
 -- Log-cosh loss, matching tfa.losses.LogCosh.  The stable form
 -- |x| + softplus(-2|x|) - log(2) avoids overflow for large residuals.
 function Losses.log_cosh(graph, labels, predictions, options)

@@ -1334,6 +1334,169 @@ test("mean_filter2d preserves mass and supports even filters", function()
   session:close()
 end)
 
+test("hinge loss matches the margin formula and reductions", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 4 }, "hinge_labels")
+  local predictions = tf.placeholder(graph, "float32", { 4 },
+    "hinge_predictions")
+  local elementwise = tfa.losses.hinge(graph, labels, predictions,
+    { reduction = "none", name = "hinge_none" })
+  local mean = tfa.losses.hinge(graph, labels, predictions,
+    { name = "hinge_mean" })
+  local total = tfa.losses.hinge(graph, labels, predictions,
+    { reduction = "sum", name = "hinge_sum" })
+  local custom = tfa.losses.hinge(graph, labels, predictions,
+    { margin = 0.5, name = "hinge_custom" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { -1, 1, 1, -1 },
+    [predictions] = { 0.5, 2, -0.5, 1 },
+  }, { elementwise, mean, total, custom })
+  local expected = { 1.5, 0, 1.5, 2 }
+  local actual = values[1]:totable()
+  for index = 1, 4 do
+    near(actual[index], expected[index], 1e-6,
+      "hinge element " .. index)
+  end
+  near(values[2]:totable(), 1.25, 1e-6, "hinge mean")
+  near(values[3]:totable(), 5, 1e-6, "hinge sum")
+  near(values[4]:totable(), 0.875, 1e-6, "hinge custom margin")
+  assert_true(tfa.losses.Hinge == tfa.losses.hinge)
+  assert_true(tfa.losses.hinge_loss == tfa.losses.hinge)
+  session:close()
+end)
+
+test("KL divergence matches the last-axis formula and reductions", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 3, 3 }, "kl_labels")
+  local predictions = tf.placeholder(graph, "float32", { 3, 3 },
+    "kl_predictions")
+  local elementwise = tfa.losses.kl_divergence(graph, labels, predictions,
+    { reduction = "none", name = "kl_none" })
+  local mean = tfa.losses.kl_divergence(graph, labels, predictions,
+    { name = "kl_mean" })
+  local total = tfa.losses.kl_divergence(graph, labels, predictions,
+    { reduction = "sum", name = "kl_sum" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { { 0.5, 0.5, 0 }, { 0, 1, 0 }, { 0, 0, 0 } },
+    [predictions] = { { 0.25, 0.75, 0 }, { 0, 0.5, 0.5 },
+      { 0, 0, 0 } },
+  }, { elementwise, mean, total })
+  local first = 0.5 * math.log(2) + 0.5 * math.log(2 / 3)
+  local second = math.log(2)
+  local actual = values[1]:totable()
+  near(actual[1], first, 1e-6, "KL first example")
+  near(actual[2], second, 1e-6, "KL second example")
+  near(actual[3], 0, 0, "KL zero labels")
+  near(values[2]:totable(), (first + second) / 3, 1e-6, "KL mean")
+  near(values[3]:totable(), first + second, 1e-6, "KL sum")
+  assert_true(tfa.losses.KLDivergence == tfa.losses.kl_divergence)
+  assert_true(tfa.losses.kl_divergence_loss == tfa.losses.kl_divergence)
+  session:close()
+end)
+
+test("precision matches binary and multiclass counts", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 4 }, "precision_labels")
+  local predictions = tf.placeholder(graph, "float32", { 4 },
+    "precision_predictions")
+  local classes = tf.placeholder(graph, "int32", { 5 },
+    "precision_classes")
+  local class_labels = tf.placeholder(graph, "float32", { 5, 3 },
+    "precision_class_labels")
+  local outputs = {
+    tfa.metrics.precision(graph, predictions, labels,
+      { threshold = 0.5, name = "precision_binary" }),
+    tfa.metrics.precision(graph, predictions, labels,
+      { threshold = 0.75, name = "precision_threshold" }),
+    tfa.metrics.precision(graph, classes, class_labels,
+      { average = "macro", name = "precision_macro" }),
+    tfa.metrics.precision(graph, classes, class_labels,
+      { average = "micro", name = "precision_micro" }),
+    tfa.metrics.precision(graph, classes, class_labels,
+      { average = "weighted", name = "precision_weighted" }),
+  }
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 1, 1, 0, 0 },
+    [predictions] = { 0.9, 0.7, 0.8, 0.1 },
+    [classes] = { 0, 0, 1, 2, 2 },
+    [class_labels] = { { 1, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 },
+      { 0, 1, 0 }, { 0, 0, 1 } },
+  }, outputs)
+  near(values[1]:totable(), 2 / 3, 1e-6, "binary precision")
+  near(values[2]:totable(), 1 / 2, 1e-6, "thresholded precision")
+  near(values[3]:totable(), 1 / 2, 1e-6, "macro precision")
+  near(values[4]:totable(), 3 / 5, 1e-6, "micro precision")
+  near(values[5]:totable(), 7 / 10, 1e-6, "weighted precision")
+  assert_true(tfa.metrics.Precision == tfa.metrics.precision)
+  session:close()
+end)
+
+test("recall matches binary and multiclass counts", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 4 }, "recall_labels")
+  local predictions = tf.placeholder(graph, "float32", { 4 },
+    "recall_predictions")
+  local classes = tf.placeholder(graph, "int32", { 5 }, "recall_classes")
+  local class_labels = tf.placeholder(graph, "float32", { 5, 3 },
+    "recall_class_labels")
+  local outputs = {
+    tfa.metrics.recall(graph, predictions, labels,
+      { threshold = 0.5, name = "recall_binary" }),
+    tfa.metrics.recall(graph, predictions, labels,
+      { threshold = 0.75, name = "recall_threshold" }),
+    tfa.metrics.recall(graph, classes, class_labels,
+      { average = "macro", name = "recall_macro" }),
+    tfa.metrics.recall(graph, classes, class_labels,
+      { average = "micro", name = "recall_micro" }),
+    tfa.metrics.recall(graph, classes, class_labels,
+      { average = "weighted", name = "recall_weighted" }),
+  }
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 1, 1, 0, 0 },
+    [predictions] = { 0.9, 0.7, 0.8, 0.1 },
+    [classes] = { 0, 0, 1, 2, 2 },
+    [class_labels] = { { 1, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 },
+      { 0, 1, 0 }, { 0, 0, 1 } },
+  }, outputs)
+  near(values[1]:totable(), 1, 1e-6, "binary recall")
+  near(values[2]:totable(), 1 / 2, 1e-6, "thresholded recall")
+  near(values[3]:totable(), 5 / 9, 1e-6, "macro recall")
+  near(values[4]:totable(), 3 / 5, 1e-6, "micro recall")
+  near(values[5]:totable(), 3 / 5, 1e-6, "weighted recall")
+  assert_true(tfa.metrics.Recall == tfa.metrics.recall)
+  session:close()
+end)
+
+test("sobel_edges matches reflected depthwise Sobel gradients", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 3, 3, 2 },
+    "sobel_input")
+  local edges = tfa.image.sobel_edges(graph, input, { name = "sobel" })
+  local session = tf.Session.new(graph)
+  local tensor = session:run({ [input] = { {
+    { { 1, 3 }, { 2, 3 }, { 3, 3 } },
+    { { 4, 3 }, { 5, 3 }, { 6, 3 } },
+    { { 7, 3 }, { 8, 3 }, { 9, 3 } },
+  } } }, { edges })[1]
+  assert_eq(table.concat(tensor:shape(), ","), "1,3,3,2,2")
+  local values = tensor:totable()
+  near(values[1][2][2][1][1], 24, 1e-6, "sobel dy at center")
+  near(values[1][2][2][1][2], 8, 1e-6, "sobel dx at center")
+  for row = 1, 3 do
+    for column = 1, 3 do
+      near(values[1][row][column][2][1], 0, 0,
+        "sobel constant dy")
+      near(values[1][row][column][2][2], 0, 0,
+        "sobel constant dx")
+    end
+  end
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -1375,6 +1538,28 @@ test("new parity options reject invalid values", function()
     { padding = "WRAP" })
   assert_true(not invalid_mean_padding,
     "mean_filter2d should reject unsupported padding")
+  local invalid_margin = pcall(tfa.losses.hinge, graph, labels, predictions,
+    { margin = -1 })
+  assert_true(not invalid_margin, "hinge should reject a negative margin")
+  local invalid_epsilon = pcall(tfa.losses.kl_divergence, graph, labels,
+    predictions, { epsilon = 0 })
+  assert_true(not invalid_epsilon,
+    "KL divergence should reject a non-positive epsilon")
+  local invalid_precision = pcall(tfa.metrics.precision, graph, predictions,
+    labels, { average = "median" })
+  assert_true(not invalid_precision,
+    "precision should reject an unknown average")
+  local invalid_recall = pcall(tfa.metrics.recall, graph, predictions, labels,
+    { average = "median" })
+  assert_true(not invalid_recall, "recall should reject an unknown average")
+  local invalid_sobel_dtype = pcall(tfa.image.sobel_edges, graph, input,
+    { dtype = "int32" })
+  assert_true(not invalid_sobel_dtype,
+    "sobel_edges should reject a non-floating point dtype")
+  local invalid_sobel_rank = pcall(tfa.image.sobel_edges, graph, input,
+    { input_shape = { 3, 3, 1 } })
+  assert_true(not invalid_sobel_rank,
+    "sobel_edges should reject a non-rank-4 input shape")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

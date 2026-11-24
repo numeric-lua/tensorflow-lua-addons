@@ -142,11 +142,7 @@ local function validate_num_classes(value, name)
   end
 end
 
-local function multiclass_f1(graph, predictions, labels, options, name)
-  local average = options.average or "macro"
-  if average ~= "macro" and average ~= "micro" and average ~= "weighted" then
-    error("f1_score average must be 'macro', 'micro', or 'weighted'", 4)
-  end
+local function multiclass_counts(graph, predictions, labels, options, name)
   local pred_classes, pred_one_hot = tensor_classes(graph, predictions,
     options, "predictions_one_hot", name .. "/predictions")
   local label_classes, label_one_hot = tensor_classes(graph, labels, options,
@@ -168,28 +164,48 @@ local function multiclass_f1(graph, predictions, labels, options, name)
     name .. "/false_positive", "float32")
   local false_negative = tf.sub(graph, label_support, true_positive,
     name .. "/false_negative", "float32")
+  return true_positive, false_positive, false_negative, label_support
+end
+
+local function multiclass_average_score(graph, predictions, labels, options,
+    name, kind)
+  local average = options.average or "macro"
+  if average ~= "macro" and average ~= "micro" and average ~= "weighted" then
+    error(name .. " average must be 'macro', 'micro', or 'weighted'", 4)
+  end
+  local true_positive, false_positive, false_negative, label_support =
+    multiclass_counts(graph, predictions, labels, options, name)
+  if average == "micro" then
+    true_positive = Ops.sum_all(graph, true_positive, name .. "/tp_total",
+      "float32")
+    false_positive = Ops.sum_all(graph, false_positive, name .. "/fp_total",
+      "float32")
+    false_negative = Ops.sum_all(graph, false_negative, name .. "/fn_total",
+      "float32")
+  end
   local two = tf.constant(graph, 2, name .. "/two", "float32")
-  local per_class = Ops.clean_div(graph, tf.mul(graph, two, true_positive,
-    name .. "/numerator", "float32"), tf.add(graph, tf.mul(graph, two,
-    true_positive, name .. "/two_tp", "float32"), tf.add(graph,
-    false_positive, false_negative, name .. "/errors", "float32"),
-    name .. "/denominator", "float32"), name .. "/per_class", "float32")
+  local per_class
+  if kind == "f1" then
+    per_class = Ops.clean_div(graph, tf.mul(graph, two, true_positive,
+      name .. "/numerator", "float32"), tf.add(graph, tf.mul(graph, two,
+      true_positive, name .. "/two_tp", "float32"), tf.add(graph,
+      false_positive, false_negative, name .. "/errors", "float32"),
+      name .. "/denominator", "float32"), name .. "/per_class", "float32")
+  elseif kind == "precision" then
+    per_class = Ops.clean_div(graph, true_positive, tf.add(graph,
+      true_positive, false_positive, name .. "/predicted_positive", "float32"),
+      name .. "/per_class", "float32")
+  elseif kind == "recall" then
+    per_class = Ops.clean_div(graph, true_positive, tf.add(graph,
+      true_positive, false_negative, name .. "/actual_positive", "float32"),
+      name .. "/per_class", "float32")
+  else
+    error("unknown multiclass score kind " .. tostring(kind), 4)
+  end
   if average == "macro" then
     return tf.reduce_mean(graph, per_class, { 0 }, name, "float32", false)
   end
-  if average == "micro" then
-    local tp = Ops.sum_all(graph, true_positive, name .. "/tp_total",
-      "float32")
-    local fp = Ops.sum_all(graph, false_positive, name .. "/fp_total",
-      "float32")
-    local fn = Ops.sum_all(graph, false_negative, name .. "/fn_total",
-      "float32")
-    local numerator = tf.mul(graph, two, tp, name .. "/micro_numerator",
-      "float32")
-    return Ops.clean_div(graph, numerator, tf.add(graph, numerator,
-      tf.add(graph, fp, fn, name .. "/micro_errors", "float32"),
-      name .. "/micro_denominator", "float32"), name, "float32")
-  end
+  if average == "micro" then return per_class end
   local weighted = tf.mul(graph, per_class, label_support,
     name .. "/weighted", "float32")
   return Ops.clean_div(graph, Ops.sum_all(graph, weighted,
@@ -197,13 +213,21 @@ local function multiclass_f1(graph, predictions, labels, options, name)
     name .. "/support_sum", "float32"), name, "float32")
 end
 
+local function multiclass_f1(graph, predictions, labels, options, name)
+  return multiclass_average_score(graph, predictions, labels, options, name,
+    "f1")
+end
+
+local function is_multiclass_request(options)
+  return options.average ~= nil or options.num_classes ~= nil or
+    options.predictions_one_hot ~= nil or options.labels_one_hot ~= nil
+end
+
 function Metrics.f1_score(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "f1_score"
   validate_num_classes(options.num_classes, name)
-  local multiclass = options.average ~= nil or options.num_classes ~= nil or
-    options.predictions_one_hot ~= nil or options.labels_one_hot ~= nil
-  if multiclass then
+  if is_multiclass_request(options) then
     return multiclass_f1(graph, predictions, labels, options, name)
   end
   local threshold = options.threshold or 0.5
@@ -214,6 +238,43 @@ function Metrics.f1_score(graph, predictions, labels, options)
     name .. "/errors", "float32"), name .. "/denominator", "float32")
   return Ops.clean_div(graph, numerator, denominator, name, "float32")
 end
+
+-- Precision, mirroring f1_score's binary/multiclass API.  Binary predictions
+-- are thresholded with `options.threshold`; multiclass inputs use
+-- `options.average = "macro" | "micro" | "weighted"` (default "macro").
+function Metrics.precision(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "precision"
+  validate_num_classes(options.num_classes, name)
+  if is_multiclass_request(options) then
+    return multiclass_average_score(graph, predictions, labels, options, name,
+      "precision")
+  end
+  local tp, fp = binary_counts(graph, predictions, labels,
+    options.threshold or 0.5, name)
+  return Ops.clean_div(graph, tp, tf.add(graph, tp, fp,
+    name .. "/predicted_positive", "float32"), name, "float32")
+end
+
+Metrics.Precision = Metrics.precision
+
+-- Recall (sensitivity), with the same binary and multiclass options as
+-- precision.
+function Metrics.recall(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "recall"
+  validate_num_classes(options.num_classes, name)
+  if is_multiclass_request(options) then
+    return multiclass_average_score(graph, predictions, labels, options, name,
+      "recall")
+  end
+  local tp, _, fn = binary_counts(graph, predictions, labels,
+    options.threshold or 0.5, name)
+  return Ops.clean_div(graph, tp, tf.add(graph, tp, fn,
+    name .. "/actual_positive", "float32"), name, "float32")
+end
+
+Metrics.Recall = Metrics.recall
 
 function Metrics.fbeta_score(graph, predictions, labels, options)
   options = options or {}

@@ -6,7 +6,7 @@ Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
 
-This is a 0.12.0 parity subset, not yet a complete TensorFlow Addons port.
+This is a 0.13.0 parity subset, not yet a complete TensorFlow Addons port.
 See the parity table below for what exists today.
 
 ## Install
@@ -32,7 +32,15 @@ local quantile_loss = tfa.losses.pinball(graph, labels, predictions,
 local focal_ce = tfa.losses.sigmoid_focal_crossentropy(graph, labels,
   predictions, { alpha = 0.25, gamma = 2 })
 local box_loss = tfa.losses.giou(graph, boxes, predicted_boxes)
+local hinge = tfa.losses.hinge(graph, signed_labels, predictions,
+  { margin = 1 })
+local kl = tfa.losses.kl_divergence(graph, label_distribution,
+  predicted_distribution, { reduction = "sum_over_batch_size" })
 local metric = tfa.metrics.f1_score(graph, predictions, labels)
+local precision = tfa.metrics.precision(graph, predicted_classes, labels,
+  { average = "macro", num_classes = 3 })
+local recall = tfa.metrics.recall(graph, predicted_classes, labels,
+  { average = "macro", num_classes = 3 })
 local macro_f1 = tfa.metrics.f1_score(graph, predicted_classes, one_hot_labels,
   { average = "macro", num_classes = 3 })
 local iou = tfa.metrics.mean_iou(graph, predicted_classes, labels,
@@ -59,6 +67,8 @@ local median = tfa.image.median_filter2d(graph, image,
   { filter_shape = { 3, 3 }, padding = "REFLECT" })
 local mean = tfa.image.mean_filter2d(graph, image,
   { filter_shape = { 3, 3 }, padding = "REFLECT" })
+local edges = tfa.image.sobel_edges(graph, image,
+  { input_shape = { 1, 8, 8, 3 } })
 local lazy = tfa.optimizers.LazyAdam(graph, loss, { weight },
   { learning_rate = 0.001 })
 local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
@@ -82,6 +92,8 @@ local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
 - `contrastive`
 - `giou`
 - `log_cosh`
+- `hinge`
+- `kl_divergence`
 - `pinball`
 - `sigmoid_focal_crossentropy`
 - `npairs_loss`
@@ -98,6 +110,20 @@ configure the graph namespace, numeric type, and zero-area denominator guard.
 `|error| + softplus(-2|error|) - log(2)` and accepts
 `options.reduction = "none" | "mean" | "sum"` (default `"mean"`, also spelled
 `"sum_over_batch_size"`). `tfa.losses.LogCosh` is an alias.
+
+`hinge(graph, labels, predictions, options)` implements binary hinge loss for
+labels in `{-1, 1}`: each element is `maximum(margin - labels * predictions, 0)`.
+`options.margin` defaults to `1`; reductions are `"none"`, `"mean"`, or `"sum"`
+(default `"sum_over_batch_size"`, which is equivalent to `"mean"`).
+`tfa.losses.Hinge` and `tfa.losses.hinge_loss` are aliases.
+
+`kl_divergence(graph, labels, predictions, options)` follows Keras'
+`kl_divergence`: both inputs are probability distributions along the last axis,
+and each example contributes `sum(labels * log(labels / predictions))`. Zero
+labels contribute zero, and predictions are floored by `options.epsilon`
+(default `1e-7`) to keep the result finite. Reductions are `"none"`, `"mean"`,
+or `"sum"` (default `"sum_over_batch_size"`). `tfa.losses.KLDivergence` and
+`tfa.losses.kl_divergence_loss` are aliases.
 
 `pinball(graph, labels, predictions, options)` implements the quantile loss
 `maximum(tau * (labels - predictions), (tau - 1) * (labels - predictions))`.
@@ -127,13 +153,16 @@ instead, using the count of shared labels as the adjacency matrix.
 an alias.
 
 Loss roadmap: `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`,
-`log_cosh`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`,
-`npairs_multilabel_loss`, and `triplet_semihard_loss` are available; further
+`log_cosh`, `hinge`, `kl_divergence`, `pinball`,
+`sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, and
+`triplet_semihard_loss` are available; hard-triplet mining and further
 specialized losses remain on the parity roadmap.
 
 ### Metrics
 
 - `f1_score` (binary threshold or multiclass averages)
+- `precision` (binary threshold or multiclass averages)
+- `recall` (binary threshold or multiclass averages)
 - `fbeta_score`
 - `matthews_corrcoef`
 - `cohen_kappa` (binary or multiclass weighted)
@@ -154,6 +183,13 @@ the count is inferred from one-hot widths or the largest class id. Use
 `options.predictions_one_hot` and `options.labels_one_hot` to override the
 integer-versus-one-hot inference. `"weighted"` weights each class by its true
 label support, while `"micro"` computes a single global F1 from all classes.
+
+`precision(graph, predictions, labels, options)` and
+`recall(graph, predictions, labels, options)` share that binary threshold and
+multiclass averaging API. Binary inputs use `options.threshold` (default
+`0.5`); multiclass inputs accept integer class ids or one-hot rows and
+`options.average = "macro"` (default), `"micro"`, or `"weighted"`.
+`tfa.metrics.Precision` and `tfa.metrics.Recall` are aliases.
 
 `cohen_kappa(graph, predictions, labels, options)` also keeps the binary
 threshold API. For multiclass kappa, pass integer class ids or one-hot rows and
@@ -269,6 +305,7 @@ the resolved `sync_period`/`slow_step_size`.
 - `gaussian_filter2d`
 - `median_filter2d`
 - `mean_filter2d`
+- `sobel_edges`
 
 `gaussian_filter2d(graph, image, options)` blurs rank-4 NHWC images (or rank-3
 HWC images with `options.rank = 3`) using an odd-sized Gaussian kernel. It
@@ -287,6 +324,12 @@ rank-3, or rank-4 images (`options.rank`, default `4`). It accepts `filter_shape
 `"SYMMETRIC"` and `"CONSTANT"`), and `constant_values` for constant padding.
 Integer images are computed in float32 and cast back to their source type.
 
+`sobel_edges(graph, image, options)` follows `tf.image.sobel_edges` for rank-4
+NHWC `float32` or `float64` images. It reflect-pads the image by one pixel and
+applies the vertical and horizontal Sobel filters per channel, returning a
+tensor shaped `[batch, height, width, channels, 2]` whose final axis is
+`[dy, dx]`.
+
 ### Callbacks
 
 - `TimeStopping`
@@ -299,12 +342,12 @@ Integer images are computed in float32 and cast back to their source type.
 | Area | Implemented | Remaining TensorFlow Addons work |
 | --- | --- | --- |
 | Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink` | additional activation wrappers |
-| Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hinge, KL divergence, hard triplet |
-| Metrics | `f1_score`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `multiclass_f1` | AUC, precision/recall, and sensitivity/specificity metrics |
+| Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
+| Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `multiclass_f1` | AUC and sensitivity/specificity metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization` | Poincaré normalization and further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `stochastic_depth` | ESN, multi-head attention, noisy dense |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Lookahead`, `WeightDecay` | averaged/conditional-gradient and further optimizer wrappers |
-| Image | horizontal/vertical flips, brightness, nearest resize, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d` | random color augmentation, warps/transforms, bilinear/area resize, Sobel filters |
+| Image | horizontal/vertical flips, brightness, nearest resize, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges` | random color augmentation, warps/transforms, bilinear/area resize |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 
