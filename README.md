@@ -6,7 +6,7 @@ Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
 
-This is a 0.13.0 parity subset, not yet a complete TensorFlow Addons port.
+This is a 0.14.0 parity subset, not yet a complete TensorFlow Addons port.
 See the parity table below for what exists today.
 
 ## Install
@@ -51,6 +51,11 @@ local mlcm = tfa.metrics.multilabel_confusion_matrix(graph, predictions, labels,
   3)
 local hamming = tfa.metrics.hamming_loss(graph, predictions, labels,
   { mode = "multiclass", threshold = 0.5 })
+local auc = tfa.metrics.auc(graph, predictions, labels, { curve = "ROC" })
+local sensitivity = tfa.metrics.sensitivity_at_specificity(graph, predictions,
+  labels, 0.9)
+local specificity = tfa.metrics.specificity_at_sensitivity(graph, predictions,
+  labels, 0.9)
 local npairs = tfa.losses.npairs_loss(graph, class_ids, similarity_matrix)
 local semihard = tfa.losses.triplet_semihard_loss(graph, class_ids, embeddings,
   { margin = 1, distance_metric = "L2" })
@@ -59,6 +64,8 @@ local frn = tfa.layers.filter_response_normalization(graph, input,
 local layer = tfa.layers.group_normalization(graph, input, 4,
   { input_shape = { 8, 8, 16 } })
 local maxout = tfa.layers.maxout(graph, input, 2)
+local noisy = tfa.layers.noisy_dense(graph, input, 32,
+  { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
   { survival_probability = 0.5, training = true })
 local blurred = tfa.image.gaussian_filter2d(graph, image,
@@ -69,6 +76,8 @@ local mean = tfa.image.mean_filter2d(graph, image,
   { filter_shape = { 3, 3 }, padding = "REFLECT" })
 local edges = tfa.image.sobel_edges(graph, image,
   { input_shape = { 1, 8, 8, 3 } })
+local shifted = tfa.image.translate(graph, image, { 2, 0 },
+  { interpolation = "bilinear" })
 local lazy = tfa.optimizers.LazyAdam(graph, loss, { weight },
   { learning_rate = 0.001 })
 local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
@@ -172,6 +181,9 @@ specialized losses remain on the parity roadmap.
 - `multilabel_confusion_matrix`
 - `hamming_loss`
 - `hamming_distance`
+- `auc` (binary ROC or precision-recall)
+- `sensitivity_at_specificity`
+- `specificity_at_sensitivity`
 - `multiclass_f1` (legacy macro-F1 helper)
 
 `f1_score(graph, predictions, labels, options)` keeps the binary threshold API
@@ -223,6 +235,23 @@ without a threshold the per-row maximum is selected and all-zero rows stay
 inactive. `hamming_distance(graph, actuals, predictions, options)` returns the
 fraction of differing element positions. `tfa.metrics.HammingLoss` is an alias.
 
+`auc(graph, predictions, labels, options)` approximates binary ROC or
+precision-recall area under the curve with a threshold sweep, following
+`tf.keras.metrics.AUC`. `options.num_thresholds` defaults to `200`; set
+`options.thresholds` to supply the interior thresholds instead. Use
+`options.curve = "ROC"` (default) or `"PR"`, `options.summation_method =
+"interpolation"` (default), `"minoring"`, or `"majoring"`, and
+`options.from_logits = true` for logits. Predictions are flattened, so dense
+binary and multilabel tensors are treated as one label dimension.
+
+`sensitivity_at_specificity(graph, predictions, labels, specificity, options)`
+returns the best sensitivity among thresholded operating points whose
+specificity is at least the requested value. `specificity_at_sensitivity(graph,
+predictions, labels, sensitivity, options)` is the symmetric metric. Both
+accept `options.num_thresholds` (default `200`) and `options.from_logits`.
+`tfa.metrics.SensitivityAtSpecificity` and
+`tfa.metrics.SpecificityAtSensitivity` are aliases.
+
 Classification metrics accept `options.name` for the graph namespace.
 
 ### Layers
@@ -234,6 +263,7 @@ Classification metrics accept `options.name` for the graph namespace.
 - `spectral_normalization`
 - `filter_response_normalization`
 - `maxout`
+- `noisy_dense`
 - `stochastic_depth`
 
 ### Layers extras
@@ -253,6 +283,17 @@ and shifted by per-channel `gamma` and `beta`. It requires
 (`options.axis`, default last) into `num_units` groups and returns the group
 maximum. Pass `options.input_shape` when using a non-last axis.
 `tfa.layers.Maxout` is an alias.
+
+`noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
+it learns mean and sigma kernel/bias variables and multiplies the sigma terms
+by factorised Gaussian noise (or independent noise with
+`options.use_factorised = false`). It requires `options.input_shape`, accepts
+`options.sigma`, `options.use_bias`, `options.activation`, and
+`options.seed`/`options.seed2`; pass `options.remove_noise = true` for the
+noise-free mean layer. `options.noise_kernel` and `options.noise_bias` inject
+explicit noise tensors. The result table exposes `output`, the mean/sigma
+variables, `variables`, and `initializers`. `tfa.layers.NoisyDense` is an
+alias.
 
 `stochastic_depth(graph, shortcut, residual, options)` follows TensorFlow
 Addons' `[shortcut, residual]` contract. With `options.training = false` it
@@ -306,6 +347,7 @@ the resolved `sync_period`/`slow_step_size`.
 - `median_filter2d`
 - `mean_filter2d`
 - `sobel_edges`
+- `translate`
 
 `gaussian_filter2d(graph, image, options)` blurs rank-4 NHWC images (or rank-3
 HWC images with `options.rank = 3`) using an odd-sized Gaussian kernel. It
@@ -330,6 +372,14 @@ applies the vertical and horizontal Sobel filters per channel, returning a
 tensor shaped `[batch, height, width, channels, 2]` whose final axis is
 `[dy, dx]`.
 
+`translate(graph, image, translations, options)` follows `tfa.image.translate`
+for rank-2 HW, rank-3 HWC, or rank-4 NHWC images (pass `options.rank` for rank-3
+or rank-2 inputs). A single `{ dx, dy }` pair applies to the whole input, or a
+list of pairs supplies one translation per batch image. `options.interpolation`
+is `"nearest"` (default) or `"bilinear"`; `options.fill_mode` is `"constant"`
+(default), `"reflect"`, `"wrap"`, or `"nearest"`; and `options.fill_value` sets
+the constant fill. `tfa.image.Translate` is an alias.
+
 ### Callbacks
 
 - `TimeStopping`
@@ -343,11 +393,11 @@ tensor shaped `[batch, height, width, channels, 2]` whose final axis is
 | --- | --- | --- |
 | Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink` | additional activation wrappers |
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
-| Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `multiclass_f1` | AUC and sensitivity/specificity metrics |
+| Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `multiclass_f1` | precision-at-recall, recall-at-precision, and further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization` | Poincaré normalization and further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `stochastic_depth` | ESN, multi-head attention, noisy dense |
+| Other layers | `poisson`, `quantization`, `maxout`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Lookahead`, `WeightDecay` | averaged/conditional-gradient and further optimizer wrappers |
-| Image | horizontal/vertical flips, brightness, nearest resize, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges` | random color augmentation, warps/transforms, bilinear/area resize |
+| Image | horizontal/vertical flips, brightness, nearest resize, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `translate` | random color augmentation, further warps, bilinear/area resize |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

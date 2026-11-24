@@ -33,6 +33,136 @@ local function binary_counts(graph, predictions, labels, threshold, name)
   return tp, fp, fn, tn
 end
 
+local function finite_number(value)
+  return type(value) == "number" and value == value and value ~= math.huge and
+    value ~= -math.huge
+end
+
+local function validate_threshold_count(value, name)
+  if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+    error(name .. " num_thresholds must be a positive integer", 4)
+  end
+  return value
+end
+
+-- Keras-style thresholds for the sensitivity/specificity metrics: a linearly
+-- spaced set in [0, 1] with both endpoints.  A single threshold is 0.5.
+local function sensitivity_thresholds(count, name)
+  count = validate_threshold_count(count or 200, name)
+  if count == 1 then return { 0.5 } end
+  local values = { 0 }
+  for index = 1, count - 2 do
+    values[#values + 1] = index / (count - 1)
+  end
+  values[#values + 1] = 1
+  return values
+end
+
+-- AUC thresholds follow Keras: the interior thresholds are evenly spaced in
+-- (0, 1), and endpoints slightly outside [0, 1] handle exact 0 and 1 scores.
+local function auc_thresholds(options, name)
+  local epsilon = 1e-7
+  local supplied = options.thresholds
+  if supplied ~= nil then
+    if type(supplied) ~= "table" or #supplied == 0 then
+      error(name .. " thresholds must be a non-empty list", 4)
+    end
+    local values = {}
+    for index, value in ipairs(supplied) do
+      if not finite_number(value) or value < 0 or value > 1 then
+        error(name .. " thresholds must be numbers in [0, 1]", 4)
+      end
+      values[index] = value
+    end
+    table.sort(values)
+    local result = { -epsilon }
+    for _, value in ipairs(values) do result[#result + 1] = value end
+    result[#result + 1] = 1 + epsilon
+    return result, #result
+  end
+  local count = validate_threshold_count(options.num_thresholds or 200, name)
+  if count <= 1 then
+    error(name .. " num_thresholds must be greater than 1", 4)
+  end
+  local values = { -epsilon }
+  for index = 1, count - 2 do
+    values[#values + 1] = index / (count - 1)
+  end
+  values[#values + 1] = 1 + epsilon
+  return values, count
+end
+
+local function vector_slice(graph, input, start, length, name, dtype)
+  return tf.slice(graph, input, { start }, { length }, name, dtype)
+end
+
+-- Count TP/FP/FN/TN at every threshold.  Labels and predictions are flattened,
+-- matching Keras' default binary (non-multi-label) treatment.
+local function thresholded_counts(graph, predictions, labels, thresholds,
+    from_logits, name, dtype)
+  labels = tf.cast(graph, labels, labels.dtype or dtype, dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or dtype, dtype,
+    name .. "/predictions")
+  if from_logits then
+    predictions = tf.nn.sigmoid(graph, predictions, name .. "/sigmoid", dtype)
+  end
+  local flat_labels = Ops.flatten(graph, labels, name .. "/labels_flat", dtype)
+  local flat_predictions = Ops.flatten(graph, predictions,
+    name .. "/predictions_flat", dtype)
+  local threshold_op = tf.constant(graph, thresholds, name .. "/thresholds",
+    dtype)
+  local threshold_matrix = tf.expand_dims(graph, threshold_op, 1,
+    name .. "/threshold_matrix", dtype)
+  local prediction_matrix = tf.expand_dims(graph, flat_predictions, 0,
+    name .. "/prediction_matrix", dtype)
+  local positive = Ops.greater(graph, prediction_matrix, threshold_matrix,
+    name .. "/positive", dtype)
+  local positive_float = tf.cast(graph, positive, "bool", dtype,
+    name .. "/positive_float")
+  local label_matrix = tf.expand_dims(graph, flat_labels, 0,
+    name .. "/label_matrix", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local label_negative = tf.sub(graph, one, label_matrix,
+    name .. "/label_negative", dtype)
+  local prediction_negative = tf.sub(graph, one, positive_float,
+    name .. "/prediction_negative", dtype)
+  local true_positive = tf.reduce_sum(graph, tf.mul(graph, positive_float,
+    label_matrix, name .. "/tp_tensor", dtype), { 1 }, name .. "/tp", dtype,
+    false)
+  local false_positive = tf.reduce_sum(graph, tf.mul(graph, positive_float,
+    label_negative, name .. "/fp_tensor", dtype), { 1 }, name .. "/fp", dtype,
+    false)
+  local false_negative = tf.reduce_sum(graph, tf.mul(graph, prediction_negative,
+    label_matrix, name .. "/fn_tensor", dtype), { 1 }, name .. "/fn", dtype,
+    false)
+  local true_negative = tf.reduce_sum(graph, tf.mul(graph, prediction_negative,
+    label_negative, name .. "/tn_tensor", dtype), { 1 }, name .. "/tn", dtype,
+    false)
+  return true_positive, false_positive, false_negative, true_negative
+end
+
+local function true_positive_rate(graph, true_positive, false_negative, name,
+    dtype)
+  return Ops.clean_div(graph, true_positive, tf.add(graph, true_positive,
+    false_negative, name .. "/actual_positive", dtype), name, dtype)
+end
+
+local function max_under_constraint(graph, constrained, dependent, target, name,
+    dtype)
+  local feasible = tf.greater_equal(graph, constrained,
+    tf.constant(graph, target, name .. "/target", dtype),
+    name .. "/feasible", dtype)
+  local feasible_float = tf.cast(graph, feasible, "bool", dtype,
+    name .. "/feasible_float")
+  local masked = tf.mul(graph, dependent, feasible_float,
+    name .. "/masked", dtype)
+  local maximum = tf.reduce_max(graph, masked, { 0 }, name .. "/maximum", dtype,
+    false)
+  return Ops.maximum(graph, maximum, tf.constant(graph, 0, name .. "/zero",
+    dtype), name, dtype)
+end
+
 local integer_dtypes = {
   int8 = true,
   int16 = true,
@@ -223,6 +353,110 @@ local function is_multiclass_request(options)
     options.predictions_one_hot ~= nil or options.labels_one_hot ~= nil
 end
 
+-- Area under the ROC or precision-recall curve for binary predictions.  The
+-- threshold sweep, endpoint epsilon, and summation methods follow
+-- tf.keras.metrics.AUC; predictions are flattened into one label dimension.
+function Metrics.auc(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "auc"
+  local dtype = options.dtype or "float32"
+  local curve = string.upper(options.curve or "ROC")
+  if curve ~= "ROC" and curve ~= "PR" then
+    error(name .. " curve must be 'ROC' or 'PR'", 4)
+  end
+  local summation = string.upper(options.summation_method or "interpolation")
+  if summation ~= "INTERPOLATION" and summation ~= "MINORING" and
+      summation ~= "MAJORING" then
+    error(name .. " summation_method must be 'interpolation', 'minoring', " ..
+      "or 'majoring'", 4)
+  end
+  local thresholds, count = auc_thresholds(options, name)
+  local tp, fp, fn, tn = thresholded_counts(graph, predictions, labels,
+    thresholds, options.from_logits == true, name, dtype)
+  local recall = true_positive_rate(graph, tp, fn, name .. "/recall", dtype)
+
+  if curve == "PR" and summation == "INTERPOLATION" then
+    local length = count - 1
+    local tp_previous = vector_slice(graph, tp, 0, length,
+      name .. "/tp_previous", dtype)
+    local tp_next = vector_slice(graph, tp, 1, length, name .. "/tp_next",
+      dtype)
+    local fp_previous = vector_slice(graph, fp, 0, length,
+      name .. "/fp_previous", dtype)
+    local fp_next = vector_slice(graph, fp, 1, length, name .. "/fp_next",
+      dtype)
+    local fn_next = vector_slice(graph, fn, 1, length, name .. "/fn_next",
+      dtype)
+    local predicted_previous = tf.add(graph, tp_previous, fp_previous,
+      name .. "/predicted_previous", dtype)
+    local predicted_next = tf.add(graph, tp_next, fp_next,
+      name .. "/predicted_next", dtype)
+    local dtp = tf.sub(graph, tp_previous, tp_next, name .. "/dtp", dtype)
+    local dp = tf.sub(graph, predicted_previous, predicted_next,
+      name .. "/dp", dtype)
+    local zero = tf.constant(graph, 0, name .. "/pr_zero", dtype)
+    local one = tf.constant(graph, 1, name .. "/pr_one", dtype)
+    local slope = Ops.clean_div(graph, dtp, Ops.maximum(graph, dp, zero,
+      name .. "/dp_safe", dtype), name .. "/prec_slope", dtype)
+    local intercept = tf.sub(graph, tp_next, tf.mul(graph, slope,
+      predicted_next, name .. "/slope_times_predicted", dtype),
+      name .. "/intercept", dtype)
+    local both_positive = tf.logical_and(graph, Ops.greater(graph,
+      predicted_previous, zero, name .. "/previous_positive", dtype),
+      Ops.greater(graph, predicted_next, zero, name .. "/next_positive", dtype),
+      name .. "/both_positive")
+    local ratio = Ops.clean_div(graph, predicted_previous,
+      Ops.maximum(graph, predicted_next, zero, name .. "/predicted_next_safe",
+        dtype), name .. "/ratio", dtype)
+    local ones = tf.add(graph, tf.mul(graph, predicted_next, zero,
+      name .. "/ones_base", dtype), one, name .. "/ones", dtype)
+    local safe_ratio = tf.where(graph, both_positive, ratio, ones,
+      name .. "/safe_ratio", dtype)
+    local log_ratio = tf.log(graph, safe_ratio, name .. "/log_ratio", dtype)
+    local numerator = tf.mul(graph, slope, tf.add(graph, dtp,
+      tf.mul(graph, intercept, log_ratio, name .. "/intercept_term", dtype),
+      name .. "/increment_numerator", dtype), name .. "/increment_numerator_scaled",
+      dtype)
+    local denominator = Ops.maximum(graph, tf.add(graph, tp_next, fn_next,
+      name .. "/positive_next", dtype), zero, name .. "/positive_next_safe",
+      dtype)
+    local increments = Ops.clean_div(graph, numerator, denominator,
+      name .. "/pr_increment", dtype)
+    return Ops.sum_all(graph, increments, name, dtype)
+  end
+
+  local x, y
+  if curve == "ROC" then
+    x = Ops.clean_div(graph, fp, tf.add(graph, fp, tn,
+      name .. "/actual_negative", dtype), name .. "/false_positive_rate", dtype)
+    y = recall
+  else
+    x = recall
+    y = Ops.clean_div(graph, tp, tf.add(graph, tp, fp,
+      name .. "/predicted_positive", dtype), name .. "/precision", dtype)
+  end
+  local length = count - 1
+  local x_previous = vector_slice(graph, x, 0, length,
+    name .. "/x_previous", dtype)
+  local x_next = vector_slice(graph, x, 1, length, name .. "/x_next", dtype)
+  local y_previous = vector_slice(graph, y, 0, length,
+    name .. "/y_previous", dtype)
+  local y_next = vector_slice(graph, y, 1, length, name .. "/y_next", dtype)
+  local heights
+  if summation == "INTERPOLATION" then
+    heights = tf.div(graph, tf.add(graph, y_previous, y_next,
+      name .. "/height_sum", dtype), tf.constant(graph, 2,
+      name .. "/two", dtype), name .. "/heights", dtype)
+  elseif summation == "MINORING" then
+    heights = Ops.minimum(graph, y_previous, y_next, name .. "/heights", dtype)
+  else
+    heights = Ops.maximum(graph, y_previous, y_next, name .. "/heights", dtype)
+  end
+  local widths = tf.sub(graph, x_previous, x_next, name .. "/widths", dtype)
+  local terms = tf.mul(graph, widths, heights, name .. "/terms", dtype)
+  return Ops.sum_all(graph, terms, name, dtype)
+end
+
 function Metrics.f1_score(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "f1_score"
@@ -275,6 +509,62 @@ function Metrics.recall(graph, predictions, labels, options)
 end
 
 Metrics.Recall = Metrics.recall
+
+-- Best sensitivity whose operating point has specificity >= the requested
+-- value, following tf.keras.metrics.SensitivityAtSpecificity.
+function Metrics.sensitivity_at_specificity(graph, predictions, labels,
+    specificity, options)
+  if type(specificity) == "table" and options == nil then
+    options = specificity
+    specificity = options.specificity
+  end
+  options = options or {}
+  if specificity == nil then specificity = options.specificity end
+  if not finite_number(specificity) or specificity < 0 or specificity > 1 then
+    error("sensitivity_at_specificity specificity must be in [0, 1]", 4)
+  end
+  local name = options.name or "sensitivity_at_specificity"
+  local dtype = options.dtype or "float32"
+  local thresholds = sensitivity_thresholds(options.num_thresholds, name)
+  local tp, fp, fn, tn = thresholded_counts(graph, predictions, labels,
+    thresholds, options.from_logits == true, name, dtype)
+  local sensitivity = true_positive_rate(graph, tp, fn,
+    name .. "/sensitivity", dtype)
+  local specificity_values = Ops.clean_div(graph, tn, tf.add(graph, tn, fp,
+    name .. "/actual_negative", dtype), name .. "/specificity", dtype)
+  return max_under_constraint(graph, specificity_values, sensitivity,
+    specificity, name, dtype)
+end
+
+Metrics.SensitivityAtSpecificity = Metrics.sensitivity_at_specificity
+
+-- Best specificity whose operating point has sensitivity >= the requested
+-- value, following tf.keras.metrics.SpecificityAtSensitivity.
+function Metrics.specificity_at_sensitivity(graph, predictions, labels,
+    sensitivity, options)
+  if type(sensitivity) == "table" and options == nil then
+    options = sensitivity
+    sensitivity = options.sensitivity
+  end
+  options = options or {}
+  if sensitivity == nil then sensitivity = options.sensitivity end
+  if not finite_number(sensitivity) or sensitivity < 0 or sensitivity > 1 then
+    error("specificity_at_sensitivity sensitivity must be in [0, 1]", 4)
+  end
+  local name = options.name or "specificity_at_sensitivity"
+  local dtype = options.dtype or "float32"
+  local thresholds = sensitivity_thresholds(options.num_thresholds, name)
+  local tp, fp, fn, tn = thresholded_counts(graph, predictions, labels,
+    thresholds, options.from_logits == true, name, dtype)
+  local sensitivity_values = true_positive_rate(graph, tp, fn,
+    name .. "/sensitivity", dtype)
+  local specificity = Ops.clean_div(graph, tn, tf.add(graph, tn, fp,
+    name .. "/actual_negative", dtype), name .. "/specificity", dtype)
+  return max_under_constraint(graph, sensitivity_values, specificity,
+    sensitivity, name, dtype)
+end
+
+Metrics.SpecificityAtSensitivity = Metrics.specificity_at_sensitivity
 
 function Metrics.fbeta_score(graph, predictions, labels, options)
   options = options or {}

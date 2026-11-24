@@ -1497,6 +1497,196 @@ test("sobel_edges matches reflected depthwise Sobel gradients", function()
   session:close()
 end)
 
+test("AUC matches the Keras threshold sweep and PR interpolation", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 4 }, "auc_labels")
+  local predictions = tf.placeholder(graph, "float32", { 4 },
+    "auc_predictions")
+  local perfect_labels = tf.placeholder(graph, "float32", { 4 },
+    "auc_perfect_labels")
+  local perfect_predictions = tf.placeholder(graph, "float32", { 4 },
+    "auc_perfect_predictions")
+  local logits = tf.placeholder(graph, "float32", { 2 }, "auc_logit_inputs")
+  local logit_labels = tf.placeholder(graph, "float32", { 2 },
+    "auc_logit_labels")
+  local roc = tfa.metrics.auc(graph, predictions, labels,
+    { num_thresholds = 3, name = "auc_roc" })
+  local pr = tfa.metrics.auc(graph, perfect_predictions, perfect_labels,
+    { num_thresholds = 3, curve = "PR", name = "auc_pr" })
+  local logit_roc = tfa.metrics.auc(graph, logits, logit_labels,
+    { num_thresholds = 3, from_logits = true, name = "auc_logits" })
+  local minor = tfa.metrics.auc(graph, predictions, labels,
+    { num_thresholds = 3, summation_method = "minoring", name = "auc_minor" })
+  local major = tfa.metrics.auc(graph, predictions, labels,
+    { num_thresholds = 3, summation_method = "majoring", name = "auc_major" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 0, 0, 1, 1 },
+    [predictions] = { 0, 0.5, 0.3, 0.9 },
+    [perfect_labels] = { 0, 0, 1, 1 },
+    [perfect_predictions] = { 0.1, 0.2, 0.8, 0.9 },
+    [logits] = { -10, 10 },
+    [logit_labels] = { 0, 1 },
+  }, { roc, pr, logit_roc, minor, major })
+  near(values[1]:totable(), 0.75, 1e-6, "ROC AUC")
+  near(values[2]:totable(), 1, 1e-6, "PR AUC")
+  near(values[3]:totable(), 1, 1e-6, "logit ROC AUC")
+  near(values[4]:totable(), 0.5, 1e-6, "minor ROC AUC")
+  near(values[5]:totable(), 1, 1e-6, "major ROC AUC")
+  session:close()
+end)
+
+test("sensitivity and specificity honor their operating constraints", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 5 }, "operating_labels")
+  local predictions = tf.placeholder(graph, "float32", { 5 },
+    "operating_predictions")
+  local sensitivity = tfa.metrics.sensitivity_at_specificity(graph,
+    predictions, labels, 0.5, { name = "sensitivity_at_half" })
+  local specificity = tfa.metrics.specificity_at_sensitivity(graph,
+    predictions, labels, { sensitivity = 0.5, name = "specificity_at_half" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [labels] = { 0, 0, 0, 1, 1 },
+    [predictions] = { 0, 0.3, 0.8, 0.3, 0.8 },
+  }, { sensitivity, specificity })
+  near(values[1]:totable(), 0.5, 1e-6, "sensitivity at 0.5 specificity")
+  near(values[2]:totable(), 2 / 3, 1e-6, "specificity at 0.5 sensitivity")
+  assert_true(tfa.metrics.SensitivityAtSpecificity ==
+    tfa.metrics.sensitivity_at_specificity)
+  assert_true(tfa.metrics.SpecificityAtSensitivity ==
+    tfa.metrics.specificity_at_sensitivity)
+  session:close()
+end)
+
+test("noisy dense applies factorised noise to its mean weights", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 2 }, "noisy_input")
+  local noise_kernel = tf.placeholder(graph, "float32", { 2, 3 },
+    "noise_kernel")
+  local noise_bias = tf.placeholder(graph, "float32", { 3 }, "noise_bias")
+  local layer = tfa.layers.noisy_dense(graph, input, 3,
+    { input_shape = { 2, 2 }, noise_kernel = noise_kernel,
+      noise_bias = noise_bias, name = "noisy" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(layer.initializers) })
+  local values = session:run({
+    [input] = { { 1, 2 }, { 3, 4 } },
+    [noise_kernel] = { { 1, 0, 0 }, { 0, 1, 0 } },
+    [noise_bias] = { 1, 2, 3 },
+  }, { layer.output, layer.kernel, layer.bias })
+  local output = values[1]:totable()
+  local kernel = values[2]:totable()
+  local bias = values[3]:totable()
+  local rows = { { 1, 2 }, { 3, 4 } }
+  for row = 1, 2 do
+    for unit = 1, 3 do
+      local expected = bias[unit]
+      for feature = 1, 2 do
+        expected = expected + rows[row][feature] * kernel[feature][unit]
+      end
+      near(output[row][unit], expected, 1e-6,
+        "noisy dense output " .. row .. "," .. unit)
+    end
+  end
+  assert_eq(#layer.variables, 4)
+  assert_eq(#layer.initializers, 4)
+  assert_true(tfa.layers.NoisyDense == tfa.layers.noisy_dense)
+  session:close()
+end)
+
+test("noisy dense supports independent noise and disabled noise", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 2 }, "noisy_variants")
+  local removed = tfa.layers.noisy_dense(graph, input, 3,
+    { input_shape = { 2, 2 }, remove_noise = true,
+      name = "noisy_removed" })
+  local independent = tfa.layers.noisy_dense(graph, input, 3,
+    { input_shape = { 2, 2 }, use_factorised = false, activation = "relu",
+      seed = 7, name = "noisy_independent" })
+  local no_bias = tfa.layers.noisy_dense(graph, input, 3,
+    { input_shape = { 2, 2 }, use_bias = false, remove_noise = true,
+      name = "noisy_no_bias" })
+  local initializers = {}
+  for _, set in ipairs({ removed.initializers, independent.initializers,
+      no_bias.initializers }) do
+    for _, initializer in ipairs(set) do
+      initializers[#initializers + 1] = initializer
+    end
+  end
+  local session = tf.Session.new(graph)
+  session:run({}, {}, initializers)
+  local values = session:run({ [input] = { { 1, -2 }, { 3, 4 } } },
+    { removed.kernel, removed.mu_kernel.read, independent.output,
+      independent.kernel, independent.bias })
+  local kernel = values[1]:totable()
+  local mean = values[2]:totable()
+  for feature = 1, 2 do
+    for unit = 1, 3 do
+      near(kernel[feature][unit], mean[feature][unit], 0,
+        "removed-noise kernel")
+    end
+  end
+  assert_eq(table.concat(values[3]:shape(), ","), "2,3")
+  assert_eq(no_bias.bias, nil)
+  assert_eq(#no_bias.initializers, 2)
+  session:close()
+end)
+
+test("translate shifts images and fills outside pixels", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 3, 3, 1 },
+    "translate_input")
+  local shifted = tfa.image.translate(graph, input, { 1, 0 },
+    { fill_value = 9, name = "translate_right" })
+  local session = tf.Session.new(graph)
+  local tensor = session:run({ [input] = { {
+    { { 1 }, { 2 }, { 3 } },
+    { { 4 }, { 5 }, { 6 } },
+    { { 7 }, { 8 }, { 9 } },
+  } } }, { shifted })[1]
+  assert_eq(table.concat(tensor:shape(), ","), "1,3,3,1")
+  local values = tensor:totable()[1]
+  local expected = {
+    { 9, 1, 2 },
+    { 9, 4, 5 },
+    { 9, 7, 8 },
+  }
+  for row = 1, 3 do
+    for column = 1, 3 do
+      near(values[row][column][1], expected[row][column], 0,
+        "translated pixel " .. row .. "," .. column)
+    end
+  end
+  assert_true(tfa.image.Translate == tfa.image.translate)
+  session:close()
+end)
+
+test("translate accepts rank-3 images and per-image translations", function()
+  local graph = tf.Graph.new()
+  local image = tf.placeholder(graph, "float32", { 2, 2, 1 }, "translate_hwc")
+  local batched = tf.placeholder(graph, "float32", { 2, 2, 2, 1 },
+    "translate_batch")
+  local moved = tfa.image.translate(graph, image, { 1, 0 },
+    { rank = 3, interpolation = "nearest", name = "translate_rank3" })
+  local batch_moved = tfa.image.translate(graph, batched,
+    { { 1, 0 }, { 0, 1 } }, { name = "translate_batch" })
+  local session = tf.Session.new(graph)
+  local values = session:run({
+    [image] = { { { 1 }, { 2 } }, { { 3 }, { 4 } } },
+    [batched] = {
+      { { { 1 }, { 2 } }, { { 3 }, { 4 } } },
+      { { { 1 }, { 2 } }, { { 3 }, { 4 } } },
+    },
+  }, { moved, batch_moved })
+  assert_eq(table.concat(values[1]:shape(), ","), "2,2,1")
+  near(values[1]:totable()[1][2][1], 1, 0, "rank-3 translation")
+  assert_eq(table.concat(values[2]:shape(), ","), "2,2,2,1")
+  near(values[2]:totable()[1][1][1][1], 0, 0, "first batch fill")
+  near(values[2]:totable()[2][2][1][1], 1, 0, "second batch shift down")
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -1560,6 +1750,37 @@ test("new parity options reject invalid values", function()
     { input_shape = { 3, 3, 1 } })
   assert_true(not invalid_sobel_rank,
     "sobel_edges should reject a non-rank-4 input shape")
+  local invalid_curve = pcall(tfa.metrics.auc, graph, predictions, labels,
+    { curve = "lift" })
+  assert_true(not invalid_curve, "AUC should reject an unknown curve")
+  local invalid_auc_thresholds = pcall(tfa.metrics.auc, graph, predictions,
+    labels, { num_thresholds = 1 })
+  assert_true(not invalid_auc_thresholds,
+    "AUC should require more than one threshold")
+  local invalid_sensitivity = pcall(tfa.metrics.sensitivity_at_specificity,
+    graph, predictions, labels, 1.5)
+  assert_true(not invalid_sensitivity,
+    "sensitivity_at_specificity should reject targets outside [0, 1]")
+  local invalid_specificity = pcall(tfa.metrics.specificity_at_sensitivity,
+    graph, predictions, labels, -0.1)
+  assert_true(not invalid_specificity,
+    "specificity_at_sensitivity should reject targets outside [0, 1]")
+  local invalid_units = pcall(tfa.layers.noisy_dense, graph, input, 0,
+    { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_units,
+    "noisy_dense should reject a non-positive unit count")
+  local invalid_noise = pcall(tfa.layers.noisy_dense, graph, input, 2,
+    { input_shape = { 1, 3, 3, 1 }, noise_kernel = input })
+  assert_true(not invalid_noise,
+    "noisy_dense should require both kernel and bias noise")
+  local invalid_translate = pcall(tfa.image.translate, graph, input, { 1, 0 },
+    { interpolation = "cubic" })
+  assert_true(not invalid_translate,
+    "translate should reject unsupported interpolation")
+  local invalid_translate_rank = pcall(tfa.image.translate, graph, input,
+    { 1, 0 }, { rank = 5 })
+  assert_true(not invalid_translate_rank,
+    "translate should reject unsupported image ranks")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

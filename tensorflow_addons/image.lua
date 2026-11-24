@@ -463,4 +463,75 @@ function Image.sobel_edges(graph, input, options)
   return reshape_dynamic(graph, output, shape, name, dtype)
 end
 
+-- Translate rank-2, rank-3, or rank-4 images with nearest or bilinear
+-- interpolation, following tfa.image.translate.  A single translation may be
+-- shared by a rank-4 batch, or one [dx, dy] pair may be supplied per image.
+function Image.translate(graph, input, translations, options)
+  options = options or {}
+  local name = options.name or "translate"
+  local dtype = options.dtype or input.dtype or "float32"
+  local rank = options.rank or
+    (type(options.input_shape) == "table" and #options.input_shape) or
+    (type(input.shape) == "table" and #input.shape) or 4
+  if rank ~= 2 and rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-2, rank-3, or rank-4 inputs", 3)
+  end
+  if type(translations) ~= "table" then
+    error(name .. " requires a [dx, dy] translation or a list of pairs", 3)
+  end
+  local pairs
+  if type(translations[1]) == "number" then
+    pairs = { translations }
+  else
+    pairs = translations
+  end
+  if #pairs == 0 then
+    error(name .. " requires at least one [dx, dy] translation", 3)
+  end
+  local rows = {}
+  for index, pair in ipairs(pairs) do
+    if type(pair) ~= "table" or #pair ~= 2 or
+        type(pair[1]) ~= "number" or type(pair[2]) ~= "number" or
+        pair[1] ~= pair[1] or pair[2] ~= pair[2] or
+        pair[1] == math.huge or pair[1] == -math.huge or
+        pair[2] == math.huge or pair[2] == -math.huge then
+      error(name .. " translations must be finite [dx, dy] pairs", 3)
+    end
+    rows[index] = { 1, 0, -pair[1], 0, 1, -pair[2], 0, 0 }
+  end
+  local fill_value = options.fill_value or 0
+  if type(fill_value) ~= "number" or fill_value ~= fill_value or
+      fill_value == math.huge or fill_value == -math.huge then
+    error(name .. " fill_value must be a finite number", 3)
+  end
+  local interpolation = string.upper(options.interpolation or "nearest")
+  if interpolation ~= "NEAREST" and interpolation ~= "BILINEAR" then
+    error(name .. " interpolation must be 'nearest' or 'bilinear'", 3)
+  end
+  local fill_mode = string.upper(options.fill_mode or "constant")
+  if fill_mode ~= "CONSTANT" and fill_mode ~= "REFLECT" and
+      fill_mode ~= "WRAP" and fill_mode ~= "NEAREST" then
+    error(name .. " fill_mode must be constant, reflect, wrap, or nearest", 3)
+  end
+  local image = to_4d_image(graph, input, rank, name .. "/image", dtype)
+  local shape = tf.shape(graph, image, name .. "/shape", dtype)
+  local output_shape = tf.slice(graph, shape, { 1 }, { 2 },
+    name .. "/output_shape", "int32")
+  local transforms = tf.constant(graph, rows, name .. "/transforms", "float32")
+  local desc = graph:new_operation("ImageProjectiveTransformV3",
+    name .. "/transform")
+  desc:add_input(image)
+  desc:add_input(transforms)
+  desc:add_input(output_shape)
+  desc:add_input(tf.constant(graph, fill_value, name .. "/fill_value",
+    "float32"))
+  desc:set_type("dtype", dtype)
+  desc:set_string("interpolation", interpolation)
+  desc:set_string("fill_mode", fill_mode)
+  local output = desc:finish()
+  return from_4d_image(graph, output, rank, name, dtype)
+end
+
+Image.Translate = Image.translate
+
 return Image

@@ -538,4 +538,183 @@ end
 
 Layers.FilterResponseNormalization = Layers.filter_response_normalization
 
+local function random_uniform_value(bound)
+  return (math.random() * 2 - 1) * bound
+end
+
+local function random_array(shape, bound, depth)
+  depth = depth or 1
+  if depth > #shape then return random_uniform_value(bound) end
+  local result = {}
+  for index = 1, shape[depth] do
+    result[index] = random_array(shape, bound, depth + 1)
+  end
+  return result
+end
+
+local function random_standard_normal(graph, shape, name, dtype, seed, seed2)
+  local desc = graph:new_operation("RandomStandardNormal", name)
+  desc:add_input(tf.constant(graph, shape, name .. "/shape", "int32"))
+  desc:set_type("dtype", dtype)
+  desc:set_int("seed", seed or 0)
+  desc:set_int("seed2", seed2 or 0)
+  return desc:finish()
+end
+
+local function scaled_noise(graph, shape, name, dtype, seed, seed2)
+  local noise = random_standard_normal(graph, shape, name .. "/normal", dtype,
+    seed, seed2)
+  local absolute = tf.abs(graph, noise, name .. "/absolute", dtype)
+  local root = tf.sqrt(graph, absolute, name .. "/root", dtype)
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local nonnegative = tf.greater_equal(graph, noise, zero,
+    name .. "/nonnegative", dtype)
+  local negative = tf.mul(graph, tf.constant(graph, -1,
+    name .. "/negative_one", dtype), root, name .. "/negative", dtype)
+  return tf.where(graph, nonnegative, root, negative, name, dtype)
+end
+
+local function noisy_dense_activation(graph, input, activation, name, dtype)
+  if activation == nil or activation == "linear" then return input end
+  if type(activation) == "function" then
+    return activation(graph, input, name, dtype)
+  end
+  local supported = {
+    relu = tf.nn.relu,
+    relu6 = tf.nn.relu6,
+    sigmoid = tf.nn.sigmoid,
+    tanh = tf.nn.tanh,
+    elu = tf.nn.elu,
+    softplus = tf.nn.softplus,
+  }
+  local fn = supported[activation]
+  if fn == nil then
+    error("noisy_dense activation must be linear, relu, relu6, sigmoid, " ..
+      "tanh, elu, or softplus", 3)
+  end
+  return fn(graph, input, name, dtype)
+end
+
+-- Noisy dense layer.  The layer learns a mean kernel/bias plus a sigma
+-- kernel/bias and injects factorised (or independent) Gaussian noise between
+-- them, following tfa.layers.NoisyDense.
+function Layers.noisy_dense(graph, input, units, options)
+  options = options or {}
+  if type(units) ~= "number" or units % 1 ~= 0 or units < 1 then
+    error("noisy_dense requires units to be a positive integer", 3)
+  end
+  local input_shape = options.input_shape or input.shape
+  if type(input_shape) ~= "table" or #input_shape < 2 then
+    error("noisy_dense requires options.input_shape with rank >= 2", 3)
+  end
+  local input_dim = input_shape[#input_shape]
+  if type(input_dim) ~= "number" or input_dim % 1 ~= 0 or input_dim < 1 then
+    error("noisy_dense requires a defined input feature dimension", 3)
+  end
+  local name = options.name or "noisy_dense"
+  local dtype = options.dtype or input.dtype or "float32"
+  local sigma = options.sigma
+  if sigma == nil then sigma = 0.5 end
+  if type(sigma) ~= "number" or sigma ~= sigma or sigma < 0 or sigma > 1 then
+    error("noisy_dense sigma must be a number in [0, 1]", 3)
+  end
+  local factorised = options.use_factorised ~= false
+  local use_bias = options.use_bias ~= false
+  local mu_bound, sigma_init
+  if factorised then
+    mu_bound = 1 / math.sqrt(input_dim)
+    sigma_init = sigma / math.sqrt(input_dim)
+  else
+    mu_bound = math.sqrt(3 / input_dim)
+    sigma_init = 0.017
+  end
+  local kernel_shape = { input_dim, units }
+  local bias_shape = { units }
+  local mu_kernel = tf.variable(graph, random_array(kernel_shape, mu_bound),
+    name .. "/mu_kernel", { dtype = dtype })
+  local sigma_kernel = tf.variable(graph,
+    filled(kernel_shape, sigma_init), name .. "/sigma_kernel",
+    { dtype = dtype })
+  local variables = { mu_kernel, sigma_kernel }
+  local initializers = { mu_kernel.initializer, sigma_kernel.initializer }
+  local mu_bias, sigma_bias, bias
+  if use_bias then
+    mu_bias = tf.variable(graph, random_array(bias_shape, mu_bound),
+      name .. "/mu_bias", { dtype = dtype })
+    sigma_bias = tf.variable(graph, filled(bias_shape, sigma_init),
+      name .. "/sigma_bias", { dtype = dtype })
+    variables[#variables + 1] = mu_bias
+    variables[#variables + 1] = sigma_bias
+    initializers[#initializers + 1] = mu_bias.initializer
+    initializers[#initializers + 1] = sigma_bias.initializer
+  end
+  local eps_kernel, eps_bias
+  if options.remove_noise == true then
+    eps_kernel = tf.constant(graph, filled(kernel_shape, 0),
+      name .. "/eps_kernel", dtype)
+    eps_bias = tf.constant(graph, filled(bias_shape, 0),
+      name .. "/eps_bias", dtype)
+  elseif options.noise_kernel ~= nil or options.noise_bias ~= nil then
+    if options.noise_kernel == nil or
+        (use_bias and options.noise_bias == nil) then
+      error("noisy_dense requires both noise_kernel and noise_bias", 3)
+    end
+    eps_kernel = options.noise_kernel
+    eps_bias = options.noise_bias or tf.constant(graph, filled(bias_shape, 0),
+      name .. "/eps_bias_zero", dtype)
+  elseif factorised then
+    local incoming = scaled_noise(graph, { input_dim, 1 },
+      name .. "/incoming_noise", dtype, options.seed, options.seed2)
+    local outgoing = scaled_noise(graph, { 1, units },
+      name .. "/outgoing_noise", dtype, options.seed, options.seed2)
+    eps_kernel = tf.matmul(graph, incoming, outgoing, name .. "/eps_kernel",
+      dtype)
+    eps_bias = tf.squeeze(graph, outgoing, 0, name .. "/eps_bias", dtype)
+  else
+    eps_kernel = random_standard_normal(graph, kernel_shape,
+      name .. "/eps_kernel", dtype, options.seed, options.seed2)
+    eps_bias = random_standard_normal(graph, bias_shape, name .. "/eps_bias",
+      dtype, options.seed, options.seed2)
+  end
+  local kernel = tf.add(graph, mu_kernel.read, tf.mul(graph,
+    sigma_kernel.read, eps_kernel, name .. "/sigma_eps_kernel", dtype),
+    name .. "/kernel", dtype)
+  if use_bias then
+    bias = tf.add(graph, mu_bias.read, tf.mul(graph, sigma_bias.read,
+      eps_bias, name .. "/sigma_eps_bias", dtype), name .. "/bias", dtype)
+  end
+  local flat_input = tf.reshape(graph, input, { -1, input_dim },
+    name .. "/flat_input", dtype)
+  local output = tf.matmul(graph, flat_input, kernel, name .. "/matmul", dtype)
+  if use_bias then
+    output = tf.add(graph, output, bias, name .. "/biased", dtype)
+  end
+  local output_shape = {}
+  for index = 1, #input_shape do output_shape[index] = input_shape[index] end
+  output_shape[1] = -1
+  output_shape[#output_shape] = units
+  output = tf.reshape(graph, output, output_shape, name .. "/output", dtype)
+  output = noisy_dense_activation(graph, output, options.activation,
+    name .. "/activation", dtype)
+  return {
+    output = output,
+    kernel = kernel,
+    bias = bias,
+    eps_kernel = eps_kernel,
+    eps_bias = eps_bias,
+    mu_kernel = mu_kernel,
+    sigma_kernel = sigma_kernel,
+    mu_bias = mu_bias,
+    sigma_bias = sigma_bias,
+    variables = variables,
+    initializers = initializers,
+    units = units,
+    input_dim = input_dim,
+    use_factorised = factorised,
+    use_bias = use_bias,
+  }
+end
+
+Layers.NoisyDense = Layers.noisy_dense
+
 return Layers
