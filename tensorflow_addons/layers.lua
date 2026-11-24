@@ -765,4 +765,139 @@ end
 
 Layers.PoincareNormalize = Layers.poincare_normalize
 
+-- Thresholded Linear Unit, following tfa.layers.TLU.  Each non-batch
+-- coordinate has a learned threshold tau; the optional affine form adds a
+-- learned slope alpha to the threshold.
+function Layers.tlu(graph, input, options)
+  options = options or {}
+  local input_shape = options.input_shape or input.shape
+  if type(input_shape) ~= "table" or #input_shape < 2 then
+    error("tlu requires options.input_shape with rank >= 2", 3)
+  end
+  local name = options.name or "tlu"
+  local dtype = options.dtype or input.dtype or "float32"
+  local parameter_shape = {}
+  for index = 2, #input_shape do
+    parameter_shape[#parameter_shape + 1] = input_shape[index]
+  end
+  local tau_value = options.tau or 0
+  local alpha_value = options.alpha or 0
+  for _, value in ipairs({ tau_value, alpha_value }) do
+    if type(value) ~= "number" or value ~= value or value == math.huge or
+        value == -math.huge then
+      error("tlu tau and alpha must be finite numbers", 3)
+    end
+  end
+  local tau = tf.variable(graph, filled(parameter_shape, tau_value),
+    name .. "/tau", { dtype = dtype })
+  local variables = { tau }
+  local initializers = { tau.initializer }
+  local alpha
+  if options.affine == true then
+    alpha = tf.variable(graph, filled(parameter_shape, alpha_value),
+      name .. "/alpha", { dtype = dtype })
+    variables[#variables + 1] = alpha
+    initializers[#initializers + 1] = alpha.initializer
+  end
+  local threshold = tau.read
+  if alpha ~= nil then
+    threshold = tf.add(graph, threshold, tf.mul(graph, alpha.read, input,
+      name .. "/alpha_term", dtype), name .. "/affine_threshold", dtype)
+  end
+  return {
+    output = Ops.maximum(graph, input, threshold, name .. "/output", dtype),
+    tau = tau,
+    alpha = alpha,
+    variables = variables,
+    initializers = initializers,
+  }
+end
+
+Layers.TLU = Layers.tlu
+
+-- Polynomial crossing layer from tfa.layers.PolynomialCrossing.  It takes the
+-- original input x0 and the previous crossing x and returns
+-- x0 * (W x + diag_scale * x) + bias + x.
+function Layers.polynomial_crossing(graph, x0, x, options)
+  options = options or {}
+  local input_shape = options.input_shape or x0.shape
+  if type(input_shape) ~= "table" then
+    error("polynomial_crossing requires options.input_shape", 3)
+  end
+  local input_dim = input_shape[#input_shape]
+  if type(input_dim) ~= "number" or input_dim % 1 ~= 0 or input_dim < 1 then
+    error("polynomial_crossing requires a defined input dimension", 3)
+  end
+  local name = options.name or "polynomial_crossing"
+  local dtype = options.dtype or x0.dtype or "float32"
+  local projection_dim = options.projection_dim
+  local diag_scale = options.diag_scale or 0
+  if type(diag_scale) ~= "number" or diag_scale ~= diag_scale or
+      diag_scale < 0 or diag_scale == math.huge then
+    error("polynomial_crossing diag_scale must be finite and non-negative", 3)
+  end
+  local bound = 1 / math.sqrt(input_dim)
+  local variables, initializers = {}, {}
+  local kernel, kernel_u, kernel_v
+  if projection_dim == nil then
+    kernel = tf.variable(graph, random_array({ input_dim, input_dim }, bound),
+      name .. "/kernel", { dtype = dtype })
+    variables[#variables + 1] = kernel
+    initializers[#initializers + 1] = kernel.initializer
+  else
+    if type(projection_dim) ~= "number" or projection_dim % 1 ~= 0 or
+        projection_dim < 1 or projection_dim > input_dim / 2 then
+      error("polynomial_crossing projection_dim must be a positive integer " ..
+        "at most half the input dimension", 3)
+    end
+    kernel_u = tf.variable(graph,
+      random_array({ input_dim, projection_dim }, bound),
+      name .. "/kernel_u", { dtype = dtype })
+    kernel_v = tf.variable(graph,
+      random_array({ projection_dim, input_dim }, bound),
+      name .. "/kernel_v", { dtype = dtype })
+    variables[#variables + 1] = kernel_u
+    variables[#variables + 1] = kernel_v
+    initializers[#initializers + 1] = kernel_u.initializer
+    initializers[#initializers + 1] = kernel_v.initializer
+  end
+  local bias
+  if options.use_bias ~= false then
+    bias = tf.variable(graph, filled({ input_dim }, 0), name .. "/bias",
+      { dtype = dtype })
+    variables[#variables + 1] = bias
+    initializers[#initializers + 1] = bias.initializer
+  end
+  local product
+  if projection_dim == nil then
+    product = tf.matmul(graph, x, kernel.read, name .. "/product", dtype)
+  else
+    local projected = tf.matmul(graph, x, kernel_u.read,
+      name .. "/projected", dtype)
+    product = tf.matmul(graph, projected, kernel_v.read,
+      name .. "/product", dtype)
+  end
+  if diag_scale ~= 0 then
+    product = tf.add(graph, product, tf.mul(graph, x,
+      tf.constant(graph, diag_scale, name .. "/diag_scale", dtype),
+      name .. "/diagonal", dtype), name .. "/scaled_product", dtype)
+  end
+  local output = tf.add(graph, tf.mul(graph, x0, product,
+    name .. "/crossed", dtype), x, name .. "/residual", dtype)
+  if bias ~= nil then
+    output = tf.add(graph, output, bias.read, name .. "/output", dtype)
+  end
+  return {
+    output = output,
+    kernel = kernel,
+    kernel_u = kernel_u,
+    kernel_v = kernel_v,
+    bias = bias,
+    variables = variables,
+    initializers = initializers,
+  }
+end
+
+Layers.PolynomialCrossing = Layers.polynomial_crossing
+
 return Layers

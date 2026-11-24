@@ -569,6 +569,92 @@ function Image.sobel_edges(graph, input, options)
   return reshape_dynamic(graph, output, shape, name, dtype)
 end
 
+local function round_op(graph, input, name, dtype)
+  local desc = graph:new_operation("Round", name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+-- Adjust image sharpness with the PIL-style 3x3 smoothing kernel, following
+-- tfa.image.sharpness.  factor = 1 preserves the image and factor = 0 uses
+-- the smoothed interior while keeping the original border.
+function Image.sharpness(graph, input, factor, name, options)
+  options = options or {}
+  name = name or "sharpness"
+  if type(factor) ~= "number" or factor ~= factor or factor < 0 or
+      factor == math.huge then
+    error("sharpness factor must be a finite non-negative number", 3)
+  end
+  local source_dtype = options.dtype or input.dtype or "float32"
+  local rank = options.rank or
+    (type(options.input_shape) == "table" and #options.input_shape) or
+    (type(input.shape) == "table" and #input.shape) or 4
+  if rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-3 or rank-4 inputs", 3)
+  end
+  local image = to_4d_image(graph, input, rank, name .. "/image",
+    source_dtype)
+  if source_dtype ~= "float32" then
+    image = tf.cast(graph, image, source_dtype, "float32",
+      name .. "/compute_input")
+  end
+  local kernel_values = {}
+  for row = 1, 3 do
+    kernel_values[row] = {}
+    for column = 1, 3 do
+      local value = 1 / 13
+      if row == 2 and column == 2 then value = 5 / 13 end
+      kernel_values[row][column] = { { value } }
+    end
+  end
+  local channels = last_dimension(graph, image, name .. "/channels", "float32")
+  local kernel = tf.constant(graph, kernel_values, name .. "/kernel",
+    "float32")
+  kernel = tile_kernel(graph, kernel, channels, name .. "/tiled_kernel",
+    "float32")
+  local smoothed = depthwise_conv(graph, image, kernel, "VALID",
+    name .. "/conv", "float32")
+  local zero = tf.constant(graph, 0, name .. "/zero", "float32")
+  local one = tf.constant(graph, 1, name .. "/one", "float32")
+  local mask = tf.add(graph, tf.mul(graph, smoothed, zero,
+    name .. "/mask_base", "float32"), one, name .. "/mask", "float32")
+  local paddings = { { 0, 0 }, { 1, 1 }, { 1, 1 }, { 0, 0 } }
+  local padded_mask = tf.pad(graph, mask, paddings, "CONSTANT",
+    name .. "/padded_mask", "float32")
+  local padded_smoothed = tf.pad(graph, smoothed, paddings, "CONSTANT",
+    name .. "/padded_smoothed", "float32")
+  local interior = tf.equal(graph, padded_mask, one,
+    name .. "/interior", "float32")
+  local result = tf.where(graph, interior, padded_smoothed, image,
+    name .. "/result", "float32")
+  local blended
+  if factor == 0 then
+    blended = result
+  elseif factor == 1 then
+    blended = tf.add(graph, image, zero, name .. "/identity", "float32")
+  else
+    local difference = tf.sub(graph, image, result, name .. "/difference",
+      "float32")
+    blended = tf.add(graph, result, tf.mul(graph, difference,
+      tf.constant(graph, factor, name .. "/factor", "float32"),
+      name .. "/scaled_difference", "float32"), name .. "/blended", "float32")
+    if factor < 1 then
+      blended = round_op(graph, blended, name .. "/rounded", "float32")
+    else
+      blended = round_op(graph, tf.clip_by_value(graph, blended, 0, 255,
+        name .. "/clipped", "float32"), name .. "/rounded", "float32")
+    end
+  end
+  if source_dtype ~= "float32" then
+    blended = tf.cast(graph, blended, "float32", source_dtype,
+      name .. "/output")
+  end
+  return from_4d_image(graph, blended, rank, name, source_dtype)
+end
+
+Image.Sharpness = Image.sharpness
+
 -- Translate rank-2, rank-3, or rank-4 images with nearest or bilinear
 -- interpolation, following tfa.image.translate.  A single translation may be
 -- shared by a rank-4 batch, or one [dx, dy] pair may be supplied per image.

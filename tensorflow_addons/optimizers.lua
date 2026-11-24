@@ -699,6 +699,200 @@ function Optimizers.ConditionalGradient(graph, loss, variables, options)
   }
 end
 
+local function constant_array(shape, value, depth)
+  depth = depth or 1
+  if depth > #shape then return value end
+  local result = {}
+  for index = 1, shape[depth] do
+    result[index] = constant_array(shape, value, depth + 1)
+  end
+  return result
+end
+
+local function sign_op(graph, input, name, dtype)
+  local desc = graph:new_operation("Sign", name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+-- Yogi adaptive optimizer, following tfa.optimizers.Yogi.  The second moment
+-- uses the sign of (gradient^2 - accumulator), and optional L1/L2 proximal
+-- terms are applied to the per-coordinate update.
+function Optimizers.Yogi(graph, loss, variables, options)
+  options = options or {}
+  if type(variables) ~= "table" or #variables == 0 then
+    error("Yogi expects a non-empty variable list", 3)
+  end
+  local learning_rate = options.learning_rate or options.lr or 0.01
+  local beta1 = options.beta1 or 0.9
+  local beta2 = options.beta2 or 0.999
+  local epsilon = options.epsilon or 1e-3
+  local l1 = options.l1_regularization_strength or 0
+  local l2 = options.l2_regularization_strength or 0
+  local initial_accumulator = options.initial_accumulator_value or 1e-6
+  local activation = options.activation or "sign"
+  if activation ~= "sign" and activation ~= "tanh" then
+    error("Yogi activation must be 'sign' or 'tanh'", 3)
+  end
+  finite_nonnegative(learning_rate, "Yogi learning_rate")
+  finite_nonnegative(l1, "Yogi l1_regularization_strength")
+  finite_nonnegative(l2, "Yogi l2_regularization_strength")
+  finite_nonnegative(initial_accumulator, "Yogi initial_accumulator_value")
+  if type(beta1) ~= "number" or beta1 ~= beta1 or beta1 < 0 or beta1 >= 1 then
+    error("Yogi beta1 must be in [0, 1)", 3)
+  end
+  if type(beta2) ~= "number" or beta2 ~= beta2 or beta2 < 0 or beta2 >= 1 then
+    error("Yogi beta2 must be in [0, 1)", 3)
+  end
+  if type(epsilon) ~= "number" or epsilon ~= epsilon or epsilon <= 0 or
+      epsilon == math.huge then
+    error("Yogi epsilon must be a finite positive number", 3)
+  end
+  local name = options.name or "Yogi"
+  local refs = {}
+  for index, variable in ipairs(variables) do
+    refs[index] = variable.ref or variable
+  end
+  local gradients = options.gradients or tf.gradients(graph, { loss }, refs)
+  local dtype = variables[1].dtype or "float32"
+  local lr = tf.constant(graph, learning_rate, name .. "/learning_rate", dtype)
+  local b1 = tf.constant(graph, beta1, name .. "/beta1", dtype)
+  local b2 = tf.constant(graph, beta2, name .. "/beta2", dtype)
+  local eps = tf.constant(graph, epsilon, name .. "/epsilon", dtype)
+  local l1_op = tf.constant(graph, l1, name .. "/l1", dtype)
+  local l2_op = tf.constant(graph, l2, name .. "/l2", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local beta1_power = Train.variable(graph, beta1, name .. "/beta1_power",
+    { dtype = dtype })
+  local beta2_power = Train.variable(graph, beta2, name .. "/beta2_power",
+    { dtype = dtype })
+  local initializers = { beta1_power.initializer, beta2_power.initializer }
+  local state_variables = { beta1_power, beta2_power }
+  local targets = {}
+  local one_minus_b1 = tf.sub(graph, one, b1, name .. "/one_minus_b1", dtype)
+  local one_minus_b2 = tf.sub(graph, one, b2, name .. "/one_minus_b2", dtype)
+
+  for index, variable in ipairs(variables) do
+    local ref = variable.ref or variable
+    local var_dtype = variable.dtype or dtype
+    local shape = variable.shape or { }
+    local gradient = gradients[index]
+    if gradient == nil then
+      error("Yogi received no gradient for variable " .. index, 3)
+    end
+    local v = Train.variable(graph, constant_array(shape, initial_accumulator),
+      name .. "/v_" .. index, { dtype = var_dtype })
+    initializers[#initializers + 1] = v.initializer
+    state_variables[#state_variables + 1] = v
+    local gradient_squared = tf.square(graph, gradient,
+      name .. "/gradient_squared_" .. index, var_dtype)
+    local difference = tf.sub(graph, gradient_squared, v.read,
+      name .. "/v_difference_" .. index, var_dtype)
+    local direction
+    if activation == "sign" then
+      direction = sign_op(graph, difference, name .. "/v_sign_" .. index,
+        var_dtype)
+    else
+      direction = tf.nn.tanh(graph, tf.mul(graph, tf.constant(graph, 10,
+        name .. "/ten_" .. index, var_dtype), difference,
+        name .. "/v_scaled_difference_" .. index, var_dtype),
+        name .. "/v_tanh_" .. index, var_dtype)
+    end
+    local v_next = tf.add(graph, v.read, tf.mul(graph, one_minus_b2,
+      tf.mul(graph, direction, gradient_squared,
+        name .. "/v_increment_" .. index, var_dtype), name .. "/v_scaled_" ..
+        index, var_dtype), name .. "/v_next_" .. index, var_dtype)
+    local v_assign = assign(graph, v.ref, v_next,
+      name .. "/v_assign_" .. index, var_dtype)
+    local v_sqrt = tf.sqrt(graph, v_next, name .. "/v_sqrt_" .. index,
+      var_dtype)
+    local one_minus_b1_power = tf.sub(graph, one, beta1_power.read,
+      name .. "/one_minus_b1_power_" .. index, var_dtype)
+    local one_minus_b2_power = tf.sub(graph, one, beta2_power.read,
+      name .. "/one_minus_b2_power_" .. index, var_dtype)
+    local bias_corrected_lr = tf.div(graph, tf.mul(graph, lr,
+      tf.sqrt(graph, one_minus_b2_power, name .. "/sqrt_b2_power_" .. index,
+        var_dtype), name .. "/lr_numerator_" .. index, var_dtype),
+      one_minus_b1_power, name .. "/bias_corrected_lr_" .. index, var_dtype)
+    local per_coordinate_lr = tf.div(graph, bias_corrected_lr,
+      tf.add(graph, v_sqrt, eps, name .. "/v_epsilon_" .. index, var_dtype),
+      name .. "/per_coordinate_lr_" .. index, var_dtype)
+    if beta1 > 0 then
+      local m = Train.variable(graph, constant_array(shape, 0),
+        name .. "/m_" .. index, { dtype = var_dtype })
+      initializers[#initializers + 1] = m.initializer
+      state_variables[#state_variables + 1] = m
+      local m_next = tf.add(graph, tf.mul(graph, m.read, b1,
+        name .. "/m_decay_" .. index, var_dtype), tf.mul(graph, gradient,
+        one_minus_b1, name .. "/m_gradient_" .. index, var_dtype),
+        name .. "/m_next_" .. index, var_dtype)
+      local m_assign = assign(graph, m.ref, m_next,
+        name .. "/m_assign_" .. index, var_dtype)
+      local candidate = tf.sub(graph, variable.read, tf.mul(graph,
+        per_coordinate_lr, m_next, name .. "/scaled_update_" .. index,
+        var_dtype), name .. "/candidate_" .. index, var_dtype)
+      local next_weight
+      if l1 > 0 then
+        local a = tf.add(graph, one, tf.mul(graph, l2_op, per_coordinate_lr,
+          name .. "/l2_lr_" .. index, var_dtype), name .. "/prox_a_" .. index,
+          var_dtype)
+        local b = tf.mul(graph, candidate, tf.constant(graph, -1,
+          name .. "/negative_one_" .. index, var_dtype),
+          name .. "/prox_b_" .. index, var_dtype)
+        local c = tf.mul(graph, l1_op, per_coordinate_lr,
+          name .. "/prox_c_" .. index, var_dtype)
+        local raw = tf.div(graph, tf.sub(graph, tf.mul(graph, c,
+          sign_op(graph, b, name .. "/prox_sign_" .. index, var_dtype), b,
+          name .. "/prox_cs_" .. index, var_dtype), name .. "/prox_num_" ..
+          index, var_dtype), a, name .. "/prox_raw_" .. index, var_dtype)
+        local keep = Ops.greater(graph, tf.abs(graph, b,
+          name .. "/prox_abs_b_" .. index, var_dtype), c,
+          name .. "/prox_keep_" .. index, var_dtype)
+        local keep_float = tf.cast(graph, keep, "bool", var_dtype,
+          name .. "/prox_keep_float_" .. index)
+        next_weight = tf.mul(graph, raw, keep_float,
+          name .. "/prox_weight_" .. index, var_dtype)
+      elseif l2 > 0 then
+        next_weight = tf.div(graph, candidate, tf.add(graph, one,
+          tf.mul(graph, l2_op, per_coordinate_lr, name .. "/l2_lr_" .. index,
+            var_dtype), name .. "/l2_denominator_" .. index, var_dtype),
+          name .. "/prox_weight_" .. index, var_dtype)
+      else
+        next_weight = candidate
+      end
+      local weight_assign = assign(graph, ref, next_weight,
+        name .. "/weight_assign_" .. index, var_dtype, { m_assign, v_assign })
+      targets[#targets + 1] = weight_assign
+    else
+      local candidate = tf.sub(graph, variable.read, tf.mul(graph,
+        per_coordinate_lr, gradient, name .. "/scaled_update_" .. index,
+        var_dtype), name .. "/candidate_" .. index, var_dtype)
+      local weight_assign = assign(graph, ref, candidate,
+        name .. "/weight_assign_" .. index, var_dtype, { v_assign })
+      targets[#targets + 1] = weight_assign
+    end
+  end
+
+  if #targets > 0 then
+    local next_b1 = tf.mul(graph, beta1_power.read, b1,
+      name .. "/next_beta1", dtype)
+    local next_b2 = tf.mul(graph, beta2_power.read, b2,
+      name .. "/next_beta2", dtype)
+    targets[#targets + 1] = assign(graph, beta1_power.ref, next_b1,
+      name .. "/assign_beta1", dtype, targets)
+    targets[#targets + 1] = assign(graph, beta2_power.ref, next_b2,
+      name .. "/assign_beta2", dtype, targets)
+  end
+
+  return targets, gradients, {
+    initializers = initializers,
+    variables = state_variables,
+    beta1_power = beta1_power,
+    beta2_power = beta2_power,
+  }
+end
+
 local function validate_average_decay(value)
   if type(value) ~= "number" or value ~= value or value < 0 or value > 1 then
     error("MovingAverage average_decay must be in [0, 1]", 3)

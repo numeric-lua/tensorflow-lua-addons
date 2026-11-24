@@ -55,4 +55,41 @@ function Activations.tanhshrink(graph, input, name, dtype)
     name .. "/output", dtype)
 end
 
+local function cos_op(graph, input, name, dtype)
+  local desc = graph:new_operation("Cos", name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+-- Snake activation: x + (1 - cos(2 * frequency * x)) / (2 * frequency).
+-- Frequency may be a Lua number or a scalar graph tensor.
+function Activations.snake(graph, input, frequency, name, dtype)
+  name = name or "snake"
+  dtype = dtype or "float32"
+  frequency = frequency or 1
+  local frequency_op
+  if type(frequency) == "number" then
+    if frequency ~= frequency or frequency <= 0 or frequency == math.huge then
+      error("snake frequency must be a finite positive number", 3)
+    end
+    frequency_op = tf.constant(graph, frequency, name .. "/frequency", dtype)
+  else
+    frequency_op = tf.cast(graph, frequency, frequency.dtype or dtype, dtype,
+      name .. "/frequency")
+  end
+  local two = tf.constant(graph, 2, name .. "/two", dtype)
+  local twice_frequency = tf.mul(graph, two, frequency_op,
+    name .. "/twice_frequency", dtype)
+  local angle = tf.mul(graph, twice_frequency, input, name .. "/angle", dtype)
+  local cosine = cos_op(graph, angle, name .. "/cos", dtype)
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local numerator = tf.sub(graph, one, cosine, name .. "/numerator", dtype)
+  local denominator = tf.mul(graph, two, frequency_op,
+    name .. "/denominator", dtype)
+  local periodic = tf.div(graph, numerator, denominator,
+    name .. "/periodic", dtype)
+  return tf.add(graph, input, periodic, name .. "/output", dtype)
+end
+
 return Activations

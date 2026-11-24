@@ -6,7 +6,7 @@ Additional activations, losses, metrics, layers, callbacks, and optimizers for
 [`tensorflow-lua`](https://github.com/numeric-lua/tensorflow-lua), modeled after
 TensorFlow Addons.
 
-This is a 0.16.0 parity subset, not yet a complete TensorFlow Addons port.
+This is a 0.17.0 parity subset, not yet a complete TensorFlow Addons port.
 See the parity table below for what exists today.
 
 ## Install
@@ -25,6 +25,7 @@ local tf = require("tensorflow")
 local tfa = require("tensorflow_addons")
 
 local activation = tfa.activations.gelu(graph, input, "gelu")
+local periodic = tfa.activations.snake(graph, input, 1)
 local loss = tfa.losses.focal(graph, labels, predictions, { gamma = 2 })
 local robust_loss = tfa.losses.log_cosh(graph, labels, predictions)
 local quantile_loss = tfa.losses.pinball(graph, labels, predictions,
@@ -69,6 +70,9 @@ local layer = tfa.layers.group_normalization(graph, input, 4,
   { input_shape = { 8, 8, 16 } })
 local maxout = tfa.layers.maxout(graph, input, 2)
 local ball = tfa.layers.poincare_normalize(graph, input, { axis = 1 })
+local thresholded = tfa.layers.tlu(graph, input, { input_shape = { 8, 16 } })
+local crossed = tfa.layers.polynomial_crossing(graph, x0, x,
+  { input_shape = { 8, 16 } })
 local noisy = tfa.layers.noisy_dense(graph, input, 32,
   { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
@@ -90,8 +94,11 @@ local recolored = tfa.image.random_hsv_in_yiq(graph, image,
 local muted = tfa.image.adjust_saturation(graph, image, 0.5)
 local small = tfa.image.bilinear_resize(graph, image, 4, 4)
 local pooled = tfa.image.area_resize(graph, image, 4, 4)
+local sharpened = tfa.image.sharpness(graph, image, 0.5)
 local conditional = tfa.optimizers.ConditionalGradient(graph, loss, { weight },
   { learning_rate = 0.01, lambda_ = 0.01 })
+local yogi = tfa.optimizers.Yogi(graph, loss, { weight },
+  { learning_rate = 0.01 })
 local moving = tfa.optimizers.MovingAverage(tfa.optimizers.LAMB,
   { average_decay = 0.99 })
 local lazy = tfa.optimizers.LazyAdam(graph, loss, { weight },
@@ -107,6 +114,11 @@ local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
 - `mish`
 - `lisht`
 - `tanhshrink`
+- `snake`
+
+`snake(graph, input, frequency, name, dtype)` implements the periodic Snake
+activation `x + (1 - cos(2 * frequency * x)) / (2 * frequency)`. Frequency may
+be a Lua number or a scalar graph tensor.
 
 ### Losses
 
@@ -289,6 +301,8 @@ Classification metrics accept `options.name` for the graph namespace.
 - `filter_response_normalization`
 - `maxout`
 - `poincare_normalize`
+- `tlu`
+- `polynomial_crossing`
 - `noisy_dense`
 - `stochastic_depth`
 
@@ -317,6 +331,19 @@ is projected into the Poincare ball with norm at most `1 - epsilon`
 unchanged. The result table exposes `output`, `axis`, and `epsilon`.
 `tfa.layers.PoincareNormalize` is an alias.
 
+`tlu(graph, input, options)` follows `tfa.layers.TLU`: each non-batch
+coordinate has a learnable threshold `tau`, and `options.affine = true` adds a
+learnable slope `alpha` to the threshold. Use `options.tau`/`options.alpha` for
+custom initial values. The result exposes `output`, `tau`, `alpha`, `variables`,
+and `initializers`. `tfa.layers.TLU` is an alias.
+
+`polynomial_crossing(graph, x0, x, options)` follows
+`tfa.layers.PolynomialCrossing`, returning
+`x0 * (W x + diag_scale * x) + bias + x`. Set `options.projection_dim` for a
+low-rank factorization, `options.diag_scale`, and `options.use_bias`. The
+result exposes `output`, the kernel variables, `bias`, `variables`, and
+`initializers`. `tfa.layers.PolynomialCrossing` is an alias.
+
 `noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
 it learns mean and sigma kernel/bias variables and multiplies the sigma terms
 by factorised Gaussian noise (or independent noise with
@@ -341,6 +368,7 @@ draw. `options.training` may also be a boolean graph tensor.
 - `LAMB`
 - `NovoGrad`
 - `LazyAdam`
+- `Yogi`
 - `ConditionalGradient` (Frobenius norm)
 - `MovingAverage` (wrapper)
 - `Lookahead` (wrapper)
@@ -358,6 +386,13 @@ Frobenius-norm conditional-gradient update
 gradient / (||gradient|| + epsilon)`. It accepts `options.learning_rate`,
 `options.lambda_` (or `options.lambda`), `options.epsilon`, and
 `options.gradients`; `options.ord` currently supports only `"fro"`.
+
+`Yogi(graph, loss, variables, options)` follows `tfa.optimizers.Yogi` with the
+sign-based second-moment accumulator. It accepts `options.learning_rate`,
+`options.beta1`, `options.beta2`, `options.epsilon`,
+`options.initial_accumulator_value`, `options.activation = "sign" | "tanh"`,
+and optional `options.l1_regularization_strength` /
+`options.l2_regularization_strength` proximal terms.
 
 `MovingAverage(base_optimizer, options)` wraps a core optimizer and maintains a
 shadow moving average of every variable with `options.average_decay` (default
@@ -395,6 +430,7 @@ the resolved `sync_period`/`slow_step_size`.
 - `resize_nearest`
 - `bilinear_resize`
 - `area_resize`
+- `sharpness`
 - `gaussian_filter2d`
 - `median_filter2d`
 - `mean_filter2d`
@@ -415,6 +451,12 @@ change the sampling convention. `area_resize(graph, image, height, width, name,
 options)` uses area interpolation and averages the source pixels covered by
 each destination pixel for float32/float64 images.
 `tfa.image.BilinearResize` and `tfa.image.AreaResize` are aliases.
+
+`sharpness(graph, image, factor, name, options)` follows `tfa.image.sharpness`
+using PIL's 3x3 smoothing kernel. `factor = 1` preserves the image, lower
+values blend toward the smoothed interior while retaining the original border,
+and values above 1 extrapolate. It supports rank-3 HWC and rank-4 NHWC images
+(`options.rank` for rank-3 inputs). `tfa.image.Sharpness` is an alias.
 
 `gaussian_filter2d(graph, image, options)` blurs rank-4 NHWC images (or rank-3
 HWC images with `options.rank = 3`) using an odd-sized Gaussian kernel. It
@@ -473,13 +515,13 @@ scales from `lower_saturation`/`upper_saturation` and
 
 | Area | Implemented | Remaining TensorFlow Addons work |
 | --- | --- | --- |
-| Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink` | additional activation wrappers |
+| Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink`, `snake` | additional activation wrappers |
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `multiclass_f1` | class-id variants and further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
-| Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient and further wrappers |
-| Image | horizontal/vertical flips, brightness, saturation, nearest/bilinear/area resize, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `translate`, `rotate`, `random_hsv_in_yiq` | further color transforms and warps |
+| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
+| Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient and further wrappers |
+| Image | horizontal/vertical flips, brightness, saturation, nearest/bilinear/area resize, `sharpness`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `translate`, `rotate`, `random_hsv_in_yiq` | further color transforms and warps |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

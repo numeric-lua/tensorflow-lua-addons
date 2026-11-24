@@ -1948,6 +1948,139 @@ test("MovingAverage tracks and assigns averaged weights", function()
   session:close()
 end)
 
+test("snake activation matches the periodic formula", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 3 }, "snake_input")
+  local output = tfa.activations.snake(graph, input, 1, "snake")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { -1, 0, 1 } }, { output })[1]
+    :totable()
+  near(values[1], -0.29192656, 1e-6, "snake negative")
+  near(values[2], 0, 1e-6, "snake zero")
+  near(values[3], 1.7080734, 1e-6, "snake positive")
+  session:close()
+end)
+
+test("TLU applies learned thresholds and affine slopes", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 3 }, "tlu_input")
+  local layer = tfa.layers.tlu(graph, input,
+    { input_shape = { 2, 3 }, tau = 0.5, affine = true, alpha = 0.25,
+      name = "tlu" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(layer.initializers) })
+  local values = session:run({ [input] = {
+    { -1, 0, 1 },
+    { 2, -2, 0 },
+  } }, { layer.output })[1]:totable()
+  local expected = {
+    { 0.25, 0.5, 1 },
+    { 2, 0, 0.5 },
+  }
+  for row = 1, 2 do
+    for column = 1, 3 do
+      near(values[row][column], expected[row][column], 1e-6,
+        "TLU " .. row .. "," .. column)
+    end
+  end
+  assert_eq(#layer.variables, 2)
+  assert_true(tfa.layers.TLU == tfa.layers.tlu)
+  session:close()
+end)
+
+test("polynomial crossing builds the Deep & Cross interaction", function()
+  local graph = tf.Graph.new()
+  local x0 = tf.placeholder(graph, "float32", { 2, 2 }, "cross_x0")
+  local x = tf.placeholder(graph, "float32", { 2, 2 }, "cross_x")
+  local layer = tfa.layers.polynomial_crossing(graph, x0, x,
+    { input_shape = { 2, 2 }, diag_scale = 0.5, name = "cross" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(layer.initializers) })
+  local values = session:run({
+    [x0] = { { 1, 2 }, { 3, 4 } },
+    [x] = { { 0.5, 1 }, { 1.5, 2 } },
+  }, { layer.output, layer.kernel.read, layer.bias.read })
+  local kernel = values[2]:totable()
+  local bias = values[3]:totable()
+  local original = { { 1, 2 }, { 3, 4 } }
+  local previous = { { 0.5, 1 }, { 1.5, 2 } }
+  local output = values[1]:totable()
+  for row = 1, 2 do
+    for column = 1, 2 do
+      local product = 0
+      for feature = 1, 2 do
+        product = product + previous[row][feature] * kernel[feature][column]
+      end
+      product = product + 0.5 * previous[row][column]
+      local expected = original[row][column] * product +
+        previous[row][column] + bias[column]
+      near(output[row][column], expected, 1e-6,
+        "polynomial crossing " .. row .. "," .. column)
+    end
+  end
+  assert_true(tfa.layers.PolynomialCrossing ==
+    tfa.layers.polynomial_crossing)
+  session:close()
+end)
+
+test("sharpness preserves identity and smooths with factor zero", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 5, 5, 1 },
+    "sharpness_input")
+  local identity = tfa.image.sharpness(graph, input, 1, "sharp_identity")
+  local smoothed = tfa.image.sharpness(graph, input, 0, "sharp_smooth")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { 0 }, { 0 }, { 0 }, { 0 }, { 0 } },
+    { { 0 }, { 0 }, { 0 }, { 0 }, { 0 } },
+    { { 0 }, { 0 }, { 1 }, { 0 }, { 0 } },
+    { { 0 }, { 0 }, { 0 }, { 0 }, { 0 } },
+    { { 0 }, { 0 }, { 0 }, { 0 }, { 0 } },
+  } } }, { identity, smoothed })
+  local identity_values = values[1]:totable()[1]
+  local smooth_values = values[2]:totable()[1]
+  near(identity_values[3][3][1], 1, 0, "sharpness identity center")
+  near(identity_values[1][1][1], 0, 0, "sharpness identity border")
+  near(smooth_values[3][3][1], 5 / 13, 1e-6, "sharpness smooth center")
+  near(smooth_values[2][3][1], 1 / 13, 1e-6, "sharpness smooth edge")
+  assert_eq(table.concat(values[2]:shape(), ","), "1,5,5,1")
+  assert_true(tfa.image.Sharpness == tfa.image.sharpness)
+  session:close()
+end)
+
+test("Yogi matches its first adaptive update", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1 } }, "yogi_weight",
+    { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 0.1 } }, "yogi_gradient",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "yogi_weighted", "float32"), { 0, 1 }, "yogi_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.Yogi(graph, loss,
+    { weight }, { learning_rate = 0.01, name = "yogi" })
+  assert_eq(#gradients, 1)
+  assert_eq(#state.variables, 4)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  local values = session:run({}, {
+    weight.read, state.beta1_power.read, state.beta2_power.read,
+    state.variables[3].read, state.variables[4].read,
+  })
+  local beta1, beta2, epsilon, learning_rate = 0.9, 0.999, 1e-3, 0.01
+  local squared = 0.1 * 0.1
+  local accumulator = 1e-6 + (1 - beta2) * squared
+  local corrected_lr = learning_rate * math.sqrt(1 - beta2) / (1 - beta1)
+  local per_coordinate = corrected_lr / (math.sqrt(accumulator) + epsilon)
+  local expected = 1 - per_coordinate * ((1 - beta1) * 0.1)
+  near(values[1]:totable()[1][1], expected, 1e-6, "Yogi weight")
+  near(values[2]:totable(), beta1 * beta1, 1e-6, "Yogi beta1 power")
+  near(values[3]:totable(), beta2 * beta2, 1e-6, "Yogi beta2 power")
+  near(values[4]:totable()[1][1], accumulator, 1e-9, "Yogi accumulator")
+  near(values[5]:totable()[1][1], (1 - beta1) * 0.1, 1e-8, "Yogi momentum")
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -2090,6 +2223,27 @@ test("new parity options reject invalid values", function()
     "gradient_descent", { start_step = 1.5 })
   assert_true(not invalid_start,
     "MovingAverage should reject non-integer start steps")
+  local invalid_frequency = pcall(tfa.activations.snake, graph, input, 0)
+  assert_true(not invalid_frequency,
+    "snake should reject non-positive frequencies")
+  local invalid_tlu = pcall(tfa.layers.tlu, graph, input, {})
+  assert_true(not invalid_tlu,
+    "TLU should require an input shape")
+  local invalid_projection = pcall(tfa.layers.polynomial_crossing, graph,
+    input, input, { input_shape = { 1, 3, 3, 1 }, projection_dim = 5 })
+  assert_true(not invalid_projection,
+    "polynomial_crossing should reject an oversized projection")
+  local invalid_sharpness = pcall(tfa.image.sharpness, graph, input, -1)
+  assert_true(not invalid_sharpness,
+    "sharpness should reject negative factors")
+  local invalid_yogi_activation = pcall(tfa.optimizers.Yogi, graph, nil,
+    { { ref = input } }, { activation = "relu" })
+  assert_true(not invalid_yogi_activation,
+    "Yogi should reject unsupported activation functions")
+  local invalid_yogi_beta = pcall(tfa.optimizers.Yogi, graph, nil,
+    { { ref = input } }, { beta1 = 1 })
+  assert_true(not invalid_yogi_beta,
+    "Yogi should reject beta1 outside [0, 1)")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
