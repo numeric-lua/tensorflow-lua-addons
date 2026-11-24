@@ -1,8 +1,9 @@
-# tensorflow-lua-addons 0.16.0
+# tensorflow-lua-addons 0.17.0
 
-- Poincare normalization layer for projecting slices into the unit ball;
-- bilinear image resize with configurable pixel-center and corner alignment;
-- area image resize with source-pixel averaging;
-- HSV saturation adjustment helper for RGB images;
-- MovingAverage optimizer wrapper with averaged-weight assignment targets;
-- 75 graph-mode tests.
+- Snake periodic activation with configurable frequency;
+- TLU layer with learned thresholds and optional affine slopes;
+- PolynomialCrossing layer with full-rank or low-rank Deep & Cross projection;
+- `sharpness` image helper using the PIL smoothing kernel and blend factor;
+- Yogi adaptive optimizer with sign/tanh second-moment updates and optional
+  proximal regularization;
+- 80 graph-mode tests.
