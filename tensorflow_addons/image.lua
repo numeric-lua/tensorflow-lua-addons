@@ -678,6 +678,41 @@ end
 
 Image.Sharpness = Image.sharpness
 
+-- Blend two same-shaped image tensors, following tfa.image.blend.  Factors
+-- between 0 and 1 interpolate, factors above 1 extrapolate and clip to 0..255.
+function Image.blend(graph, image1, image2, factor, name)
+  name = name or "blend"
+  if type(factor) ~= "number" or factor ~= factor or factor < 0 or
+      factor == math.huge then
+    error("blend factor must be a finite non-negative number", 3)
+  end
+  local dtype = image1.dtype or image2.dtype or "float32"
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  if factor == 0 then
+    return tf.add(graph, image1, zero, name, dtype)
+  end
+  if factor == 1 then
+    return tf.add(graph, image2, zero, name, dtype)
+  end
+  local first = tf.cast(graph, image1, image1.dtype or dtype, "float32",
+    name .. "/first")
+  local second = tf.cast(graph, image2, image2.dtype or dtype, "float32",
+    name .. "/second")
+  local difference = tf.sub(graph, second, first, name .. "/difference",
+    "float32")
+  local blended = tf.add(graph, first, tf.mul(graph, difference,
+    tf.constant(graph, factor, name .. "/factor", "float32"),
+    name .. "/scaled_difference", "float32"), name .. "/blended", "float32")
+  if factor < 1 then
+    return round_op(graph, blended, name, "float32")
+  end
+  blended = tf.clip_by_value(graph, blended, 0, 255, name .. "/clipped",
+    "float32")
+  return round_op(graph, blended, name, "float32")
+end
+
+Image.Blend = Image.blend
+
 -- Translate rank-2, rank-3, or rank-4 images with nearest or bilinear
 -- interpolation, following tfa.image.translate.  A single translation may be
 -- shared by a rank-4 batch, or one [dx, dy] pair may be supplied per image.

@@ -893,6 +893,30 @@ function Optimizers.Yogi(graph, loss, variables, options)
   }
 end
 
+-- Adam with decoupled weight decay, matching tfa.optimizers.AdamW.  The core
+-- tensorflow.train.adamw implementation provides the decoupled update.
+function Optimizers.AdamW(graph, loss, variables, options)
+  local merged = merge_tables(options or {})
+  merged.weight_decay = merged.weight_decay or merged.wd or 0.004
+  merged.name = merged.name or "AdamW"
+  return Train.adamw(graph, loss, variables, merged)
+end
+
+-- SGD with decoupled weight decay, matching tfa.optimizers.SGDW's weight-decay
+-- behavior.  Momentum and Nesterov options are not supported by this wrapper.
+function Optimizers.SGDW(graph, loss, variables, options)
+  local merged = merge_tables(options or {})
+  if merged.momentum ~= nil and merged.momentum ~= 0 then
+    error("SGDW momentum is not supported by this implementation", 3)
+  end
+  merged.weight_decay = merged.weight_decay or merged.wd or 0.004
+  merged.name = merged.name or "SGDW"
+  local learning_rate = merged.learning_rate or merged.lr or 0.01
+  local targets, gradients, lr = Train.gradient_descent(graph, loss, variables,
+    learning_rate, merged.name, merged)
+  return targets, gradients, { learning_rate = lr }
+end
+
 local function validate_average_decay(value)
   if type(value) ~= "number" or value ~= value or value < 0 or value > 1 then
     error("MovingAverage average_decay must be in [0, 1]", 3)

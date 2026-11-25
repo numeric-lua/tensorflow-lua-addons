@@ -2204,6 +2204,111 @@ test("sparsemax produces sparse probability rows", function()
   session:close()
 end)
 
+test("adaptive average pooling reduces equal spatial bins", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "adaptive_avg_input")
+  local output = tfa.layers.adaptive_average_pooling_2d(graph, input, 2,
+    { input_shape = { 1, 4, 4, 1 }, name = "adaptive_avg" })
+  local values = run(graph, { [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, output)[1]
+  assert_eq(table.concat({ #values, #values[1], #values[1][1] }, ","),
+    "2,2,1")
+  near(values[1][1][1], 3.5, 1e-6, "adaptive average top-left")
+  near(values[1][2][1], 5.5, 1e-6, "adaptive average top-right")
+  near(values[2][1][1], 11.5, 1e-6, "adaptive average bottom-left")
+  near(values[2][2][1], 13.5, 1e-6, "adaptive average bottom-right")
+  assert_true(tfa.layers.AdaptiveAveragePooling2D ==
+    tfa.layers.adaptive_average_pooling_2d)
+end)
+
+test("adaptive max pooling reduces equal spatial bins", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "adaptive_max_input")
+  local output = tfa.layers.adaptive_max_pooling_2d(graph, input, { 2, 2 },
+    { input_shape = { 1, 4, 4, 1 }, name = "adaptive_max" })
+  local values = run(graph, { [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, output)[1]
+  assert_eq(table.concat({ #values, #values[1], #values[1][1] }, ","),
+    "2,2,1")
+  near(values[1][1][1], 6, 1e-6, "adaptive max top-left")
+  near(values[1][2][1], 8, 1e-6, "adaptive max top-right")
+  near(values[2][1][1], 14, 1e-6, "adaptive max bottom-left")
+  near(values[2][2][1], 16, 1e-6, "adaptive max bottom-right")
+  assert_true(tfa.layers.AdaptiveMaxPooling2D ==
+    tfa.layers.adaptive_max_pooling_2d)
+end)
+
+test("blend interpolates and extrapolates pixel values", function()
+  local graph = tf.Graph.new()
+  local first = tf.placeholder(graph, "float32", { 1, 1, 1, 1 },
+    "blend_first")
+  local second = tf.placeholder(graph, "float32", { 1, 1, 1, 1 },
+    "blend_second")
+  local half = tfa.image.blend(graph, first, second, 0.5, "blend_half")
+  local double = tfa.image.blend(graph, first, second, 2, "blend_double")
+  local original = tfa.image.blend(graph, first, second, 0, "blend_first_only")
+  local other = tfa.image.blend(graph, first, second, 1, "blend_second_only")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [first] = { { { { 10 } } } },
+    [second] = { { { { 20 } } } } }, { half, double, original, other })
+  local function scalar(tensor)
+    return tensor:totable()[1][1][1][1]
+  end
+  near(scalar(values[1]), 15, 1e-6, "blend half")
+  near(scalar(values[2]), 30, 1e-6, "blend double")
+  near(scalar(values[3]), 10, 1e-6, "blend first")
+  near(scalar(values[4]), 20, 1e-6, "blend second")
+  assert_true(tfa.image.Blend == tfa.image.blend)
+  session:close()
+end)
+
+test("AdamW decouples weight decay from the adaptive update", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1 } }, "adamw_weight",
+    { dtype = "float32" })
+  local zero = tf.constant(graph, { { 0 } }, "adamw_zero", "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, zero,
+    "adamw_weighted", "float32"), { 0, 1 }, "adamw_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.AdamW(graph, loss,
+    { weight }, { learning_rate = 0.1, weight_decay = 0.1, name = "adamw" })
+  assert_eq(#gradients, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  near(session:run({}, { weight.read })[1]:totable()[1][1], 0.99, 1e-6,
+    "AdamW decay")
+  session:close()
+end)
+
+test("SGDW applies decoupled weight decay", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1 } }, "sgdw_weight",
+    { dtype = "float32" })
+  local zero = tf.constant(graph, { { 0 } }, "sgdw_zero", "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, zero,
+    "sgdw_weighted", "float32"), { 0, 1 }, "sgdw_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.SGDW(graph, loss,
+    { weight }, { learning_rate = 0.1, weight_decay = 0.1, name = "sgdw" })
+  assert_eq(#gradients, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer })
+  session:run({}, {}, targets)
+  near(session:run({}, { weight.read })[1]:totable()[1][1], 0.99, 1e-6,
+    "SGDW decay")
+  assert_true(state.learning_rate ~= nil)
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -2390,6 +2495,17 @@ test("new parity options reject invalid values", function()
     { input_shape = { 1, 3, 3, 1 }, axis = 8 })
   assert_true(not invalid_sparsemax,
     "sparsemax should reject out-of-range axes")
+  local invalid_pooling = pcall(tfa.layers.adaptive_average_pooling_2d,
+    graph, input, 2, { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_pooling,
+    "adaptive pooling should reject non-divisible dimensions")
+  local invalid_blend = pcall(tfa.image.blend, graph, input, input, -1)
+  assert_true(not invalid_blend,
+    "blend should reject negative factors")
+  local invalid_sgdw = pcall(tfa.optimizers.SGDW, graph, nil,
+    { { ref = input } }, { momentum = 0.9 })
+  assert_true(not invalid_sgdw,
+    "SGDW should reject unsupported momentum")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

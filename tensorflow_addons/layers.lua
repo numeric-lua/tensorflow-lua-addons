@@ -1040,4 +1040,72 @@ end
 
 Layers.Sparsemax = Layers.sparsemax
 
+local function pooling_2d(graph, input, output_size, options, reduce,
+    reducer_name)
+  options = options or {}
+  local name = options.name or reducer_name .. "_pooling_2d"
+  local dtype = options.dtype or input.dtype or "float32"
+  local data_format = options.data_format or "channels_last"
+  if data_format ~= "channels_last" and data_format ~= "channels_first" then
+    error(name .. " data_format must be channels_last or channels_first", 3)
+  end
+  local bins = output_size
+  if type(bins) == "number" then bins = { bins, bins } end
+  if type(bins) ~= "table" or #bins ~= 2 then
+    error(name .. " output_size must be an integer or {rows, cols}", 3)
+  end
+  for _, value in ipairs(bins) do
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+      error(name .. " output_size entries must be positive integers", 3)
+    end
+  end
+  local input_shape = options.input_shape or input.shape
+  if type(input_shape) == "table" then
+    if #input_shape ~= 4 then
+      error(name .. " requires rank-4 inputs", 3)
+    end
+    local height, width
+    if data_format == "channels_last" then
+      height, width = input_shape[2], input_shape[3]
+    else
+      height, width = input_shape[3], input_shape[4]
+    end
+    if height % bins[1] ~= 0 or width % bins[2] ~= 0 then
+      error(name .. " input height and width must be divisible by output_size",
+        3)
+    end
+  end
+  local height_axis = data_format == "channels_last" and 1 or 2
+  local width_axis = data_format == "channels_last" and 2 or 3
+  local row_splits = tf.split(graph, input, bins[1], height_axis,
+    name .. "/rows", dtype)
+  local rows = tf.stack(graph, row_splits, height_axis, name .. "/row_stack",
+    dtype)
+  local column_splits = tf.split(graph, rows, bins[2], width_axis + 1,
+    name .. "/columns", dtype)
+  local cells = tf.stack(graph, column_splits, width_axis + 1,
+    name .. "/column_stack", dtype)
+  local axes
+  if data_format == "channels_last" then
+    axes = { 2, 4 }
+  else
+    axes = { 3, 5 }
+  end
+  return reduce(graph, cells, axes, name .. "/output", dtype, false)
+end
+
+function Layers.adaptive_average_pooling_2d(graph, input, output_size, options)
+  return pooling_2d(graph, input, output_size, options, tf.reduce_mean,
+    "adaptive_average")
+end
+
+Layers.AdaptiveAveragePooling2D = Layers.adaptive_average_pooling_2d
+
+function Layers.adaptive_max_pooling_2d(graph, input, output_size, options)
+  return pooling_2d(graph, input, output_size, options, tf.reduce_max,
+    "adaptive_max")
+end
+
+Layers.AdaptiveMaxPooling2D = Layers.adaptive_max_pooling_2d
+
 return Layers

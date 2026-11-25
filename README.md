@@ -74,6 +74,8 @@ local thresholded = tfa.layers.tlu(graph, input, { input_shape = { 8, 16 } })
 local crossed = tfa.layers.polynomial_crossing(graph, x0, x,
   { input_shape = { 8, 16 } })
 local sparse = tfa.layers.sparsemax(graph, input, { input_shape = { 8, 16 } })
+local adaptive = tfa.layers.adaptive_average_pooling_2d(graph, image, 4,
+  { input_shape = { 1, 8, 8, 16 } })
 local noisy = tfa.layers.noisy_dense(graph, input, 32,
   { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
@@ -101,10 +103,15 @@ local random_cut = tfa.image.random_cutout(graph, image, { 4, 4 })
 local small = tfa.image.bilinear_resize(graph, image, 4, 4)
 local pooled = tfa.image.area_resize(graph, image, 4, 4)
 local sharpened = tfa.image.sharpness(graph, image, 0.5)
+local mixed = tfa.image.blend(graph, image, other_image, 0.5)
 local conditional = tfa.optimizers.ConditionalGradient(graph, loss, { weight },
   { learning_rate = 0.01, lambda_ = 0.01 })
 local yogi = tfa.optimizers.Yogi(graph, loss, { weight },
   { learning_rate = 0.01 })
+local adamw = tfa.optimizers.AdamW(graph, loss, { weight },
+  { learning_rate = 0.001, weight_decay = 0.004 })
+local sgdw = tfa.optimizers.SGDW(graph, loss, { weight },
+  { learning_rate = 0.01, weight_decay = 0.004 })
 local moving = tfa.optimizers.MovingAverage(tfa.optimizers.LAMB,
   { average_decay = 0.99 })
 local lazy = tfa.optimizers.LazyAdam(graph, loss, { weight },
@@ -310,6 +317,8 @@ Classification metrics accept `options.name` for the graph namespace.
 - `tlu`
 - `polynomial_crossing`
 - `sparsemax`
+- `adaptive_average_pooling_2d`
+- `adaptive_max_pooling_2d`
 - `noisy_dense`
 - `stochastic_depth`
 
@@ -356,6 +365,14 @@ logits onto the probability simplex along `options.axis` (default last). The
 result exposes `output` and the resolved `axis`. `tfa.layers.Sparsemax` is an
 alias.
 
+`adaptive_average_pooling_2d(graph, input, output_size, options)` and
+`adaptive_max_pooling_2d(graph, input, output_size, options)` follow TensorFlow
+Addons' adaptive 2D pooling layers. They accept int or `{rows, cols}` output
+sizes and `options.data_format = "channels_last"` (default) or
+`"channels_first"`. Input height and width must be divisible by the requested
+bins. `tfa.layers.AdaptiveAveragePooling2D` and
+`tfa.layers.AdaptiveMaxPooling2D` are aliases.
+
 `noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
 it learns mean and sigma kernel/bias variables and multiplies the sigma terms
 by factorised Gaussian noise (or independent noise with
@@ -381,6 +398,8 @@ draw. `options.training` may also be a boolean graph tensor.
 - `NovoGrad`
 - `LazyAdam`
 - `Yogi`
+- `AdamW`
+- `SGDW`
 - `ConditionalGradient` (Frobenius norm)
 - `MovingAverage` (wrapper)
 - `Lookahead` (wrapper)
@@ -405,6 +424,11 @@ sign-based second-moment accumulator. It accepts `options.learning_rate`,
 `options.initial_accumulator_value`, `options.activation = "sign" | "tanh"`,
 and optional `options.l1_regularization_strength` /
 `options.l2_regularization_strength` proximal terms.
+
+`AdamW(graph, loss, variables, options)` exposes the core decoupled AdamW
+update with TensorFlow Addons' default `weight_decay` of `0.004`.
+`SGDW(graph, loss, variables, options)` exposes SGD with the same decoupled
+weight-decay behavior; momentum and Nesterov options are not supported.
 
 `MovingAverage(base_optimizer, options)` wraps a core optimizer and maintains a
 shadow moving average of every variable with `options.average_decay` (default
@@ -447,6 +471,7 @@ the resolved `sync_period`/`slow_step_size`.
 - `bilinear_resize`
 - `area_resize`
 - `sharpness`
+- `blend`
 - `gaussian_filter2d`
 - `median_filter2d`
 - `mean_filter2d`
@@ -492,6 +517,10 @@ using PIL's 3x3 smoothing kernel. `factor = 1` preserves the image, lower
 values blend toward the smoothed interior while retaining the original border,
 and values above 1 extrapolate. It supports rank-3 HWC and rank-4 NHWC images
 (`options.rank` for rank-3 inputs). `tfa.image.Sharpness` is an alias.
+
+`blend(graph, image1, image2, factor, name)` follows `tfa.image.blend`:
+factors between 0 and 1 interpolate and round, while factors above 1
+extrapolate and clip to `0..255`. `tfa.image.Blend` is an alias.
 
 `gaussian_filter2d(graph, image, options)` blurs rank-4 NHWC images (or rank-3
 HWC images with `options.rank = 3`) using an odd-sized Gaussian kernel. It
@@ -554,9 +583,9 @@ scales from `lower_saturation`/`upper_saturation` and
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `multiclass_f1` | class-id variants and further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
-| Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient and further wrappers |
-| Image | horizontal/vertical flips, brightness, saturation/hue, nearest/bilinear/area resize, `sharpness`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
+| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
+| Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
+| Image | horizontal/vertical flips, brightness, saturation/hue, nearest/bilinear/area resize, `sharpness`, `blend`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 
