@@ -2371,6 +2371,95 @@ test("f1_score supports class-id selection", function()
   near(value, 2 / 3, 1e-6, "class-id F1")
 end)
 
+test("adaptive average pooling 1D reduces equal length bins", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 1 },
+    "adaptive_avg_1d_input")
+  local output = tfa.layers.adaptive_average_pooling_1d(graph, input, 2,
+    { input_shape = { 1, 4, 1 }, name = "adaptive_avg_1d" })
+  local values = run(graph, { [input] = { { { 1 }, { 2 }, { 3 }, { 4 } } } },
+    output)[1]
+  assert_eq(#values, 2)
+  near(values[1][1], 1.5, 1e-6, "adaptive average 1D first")
+  near(values[2][1], 3.5, 1e-6, "adaptive average 1D second")
+  assert_true(tfa.layers.AdaptiveAveragePooling1D ==
+    tfa.layers.adaptive_average_pooling_1d)
+end)
+
+test("adaptive max pooling 1D reduces equal length bins", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 1 },
+    "adaptive_max_1d_input")
+  local output = tfa.layers.adaptive_max_pooling_1d(graph, input, 2,
+    { input_shape = { 1, 4, 1 }, name = "adaptive_max_1d" })
+  local values = run(graph, { [input] = { { { 1 }, { 2 }, { 3 }, { 4 } } } },
+    output)[1]
+  assert_eq(#values, 2)
+  near(values[1][1], 2, 1e-6, "adaptive max 1D first")
+  near(values[2][1], 4, 1e-6, "adaptive max 1D second")
+  assert_true(tfa.layers.AdaptiveMaxPooling1D ==
+    tfa.layers.adaptive_max_pooling_1d)
+end)
+
+test("adjust_hsv_in_yiq applies the YIQ color matrix", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "hsv_yiq_input")
+  local grayscale = tfa.image.adjust_hsv_in_yiq(graph, input, 0, 0, 1,
+    { name = "hsv_yiq_gray" })
+  local identity = tfa.image.adjust_hsv_in_yiq(graph, input, 0, 1, 1,
+    { name = "hsv_yiq_identity" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { { { { 0.2, 0.4, 0.8 } } } } },
+    { grayscale, identity })
+  local luminance = 0.299 * 0.2 + 0.587 * 0.4 + 0.114 * 0.8
+  local gray = values[1]:totable()[1][1][1]
+  local original = values[2]:totable()[1][1][1]
+  for channel = 1, 3 do
+    near(gray[channel], luminance, 1e-6, "HSV YIQ grayscale")
+  end
+  near(original[1], 0.2, 1e-6, "HSV YIQ identity red")
+  near(original[2], 0.4, 1e-6, "HSV YIQ identity green")
+  near(original[3], 0.8, 1e-6, "HSV YIQ identity blue")
+  assert_true(tfa.image.AdjustHSVInYIQ == tfa.image.adjust_hsv_in_yiq)
+  session:close()
+end)
+
+test("compose_transforms multiplies transform rows", function()
+  local graph = tf.Graph.new()
+  local composed = tfa.image.compose_transforms(graph, {
+    { 1, 0, -1, 0, 1, 0, 0, 0 },
+    { 1, 0, -1, 0, 1, 0, 0, 0 },
+  }, { name = "compose" })
+  local values = run(graph, {}, composed)
+  near(values[1][1], 1, 1e-6, "composed identity a")
+  near(values[1][2], 0, 1e-6, "composed identity b")
+  near(values[1][3], -2, 1e-6, "composed translation")
+  near(values[1][5], 1, 1e-6, "composed identity d")
+  assert_true(tfa.image.ComposeTransforms == tfa.image.compose_transforms)
+end)
+
+test("angles_to_projective_transforms matches the rotation matrix", function()
+  local graph = tf.Graph.new()
+  local identity = tfa.image.angles_to_projective_transforms(graph, 0, 2, 2,
+    { name = "angles_identity" })
+  local quarter = tfa.image.angles_to_projective_transforms(graph, math.pi / 2,
+    2, 2, { name = "angles_quarter" })
+  local session = tf.Session.new(graph)
+  local values = session:run({}, { identity, quarter })
+  local identity_row = values[1]:totable()[1]
+  local quarter_row = values[2]:totable()[1]
+  near(identity_row[1], 1, 1e-6, "angle identity a")
+  near(identity_row[3], 0, 1e-6, "angle identity offset")
+  near(quarter_row[1], 0, 1e-6, "quarter cosine")
+  near(quarter_row[2], -1, 1e-6, "quarter negative sine")
+  near(quarter_row[3], 1, 1e-6, "quarter x offset")
+  assert_eq(table.concat(values[2]:shape(), ","), "1,8")
+  assert_true(tfa.image.AnglesToProjectiveTransforms ==
+    tfa.image.angles_to_projective_transforms)
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -2572,6 +2661,22 @@ test("new parity options reject invalid values", function()
     { class_id = -1 })
   assert_true(not invalid_class_id,
     "precision should reject negative class ids")
+  local invalid_pooling_1d = pcall(tfa.layers.adaptive_average_pooling_1d,
+    graph, input, 2, { input_shape = { 1, 3, 1 } })
+  assert_true(not invalid_pooling_1d,
+    "adaptive 1D pooling should reject non-divisible lengths")
+  local invalid_hsv_yiq = pcall(tfa.image.adjust_hsv_in_yiq, graph, input,
+    0, 1, 1, { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_hsv_yiq,
+    "adjust_hsv_in_yiq should require three channels")
+  local invalid_compose = pcall(tfa.image.compose_transforms, graph,
+    { { 1, 0, 0 } })
+  assert_true(not invalid_compose,
+    "compose_transforms should reject short transform rows")
+  local invalid_angles = pcall(tfa.image.angles_to_projective_transforms,
+    graph, 0, 0, 2)
+  assert_true(not invalid_angles,
+    "angles_to_projective_transforms should reject zero dimensions")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

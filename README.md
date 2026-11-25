@@ -80,6 +80,8 @@ local crossed = tfa.layers.polynomial_crossing(graph, x0, x,
 local sparse = tfa.layers.sparsemax(graph, input, { input_shape = { 8, 16 } })
 local adaptive = tfa.layers.adaptive_average_pooling_2d(graph, image, 4,
   { input_shape = { 1, 8, 8, 16 } })
+local adaptive_1d = tfa.layers.adaptive_average_pooling_1d(graph, sequence, 4,
+  { input_shape = { 1, 16, 8 } })
 local noisy = tfa.layers.noisy_dense(graph, input, 32,
   { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
@@ -100,8 +102,13 @@ local recolored = tfa.image.random_hsv_in_yiq(graph, image,
   { max_delta_hue = 0.1, lower_saturation = 0.8, upper_saturation = 1.2 })
 local muted = tfa.image.adjust_saturation(graph, image, 0.5)
 local hued = tfa.image.adjust_hue(graph, image, 0.25)
+local hsv = tfa.image.adjust_hsv_in_yiq(graph, image, 0.1, 1.1, 0.9)
 local transformed = tfa.image.transform(graph, image,
   { 1, 0, 0, 0, 1, 0, 0, 0 })
+local composed = tfa.image.compose_transforms(graph,
+  { { 1, 0, 1, 0, 1, 0, 0, 0 }, { 1, 0, 1, 0, 1, 0, 0, 0 } })
+local angle_rows = tfa.image.angles_to_projective_transforms(graph,
+  math.pi / 4, 8, 8)
 local cut = tfa.image.cutout(graph, image, { 4, 4 }, { 8, 8 })
 local random_cut = tfa.image.random_cutout(graph, image, { 4, 4 })
 local small = tfa.image.bilinear_resize(graph, image, 4, 4)
@@ -335,6 +342,8 @@ Classification metrics accept `options.name` for the graph namespace.
 - `tlu`
 - `polynomial_crossing`
 - `sparsemax`
+- `adaptive_average_pooling_1d`
+- `adaptive_max_pooling_1d`
 - `adaptive_average_pooling_2d`
 - `adaptive_max_pooling_2d`
 - `noisy_dense`
@@ -390,6 +399,13 @@ sizes and `options.data_format = "channels_last"` (default) or
 `"channels_first"`. Input height and width must be divisible by the requested
 bins. `tfa.layers.AdaptiveAveragePooling2D` and
 `tfa.layers.AdaptiveMaxPooling2D` are aliases.
+
+`adaptive_average_pooling_1d(graph, input, output_size, options)` and
+`adaptive_max_pooling_1d(graph, input, output_size, options)` provide the
+corresponding rank-3 adaptive 1D pooling layers. Input length must be divisible
+by `output_size`; `options.data_format` supports channels-last and
+channels-first. `tfa.layers.AdaptiveAveragePooling1D` and
+`tfa.layers.AdaptiveMaxPooling1D` are aliases.
 
 `noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
 it learns mean and sigma kernel/bias variables and multiplies the sigma terms
@@ -482,7 +498,10 @@ the resolved `sync_period`/`slow_step_size`.
 - `adjust_brightness`
 - `adjust_saturation`
 - `adjust_hue`
+- `adjust_hsv_in_yiq`
 - `transform`
+- `compose_transforms`
+- `angles_to_projective_transforms`
 - `cutout`
 - `random_cutout`
 - `resize_nearest`
@@ -505,12 +524,27 @@ preserves the image. `tfa.image.AdjustSaturation` is an alias.
 `adjust_hue(graph, image, delta, name)` rotates hue by a normalized delta,
 following `tf.image.adjust_hue`. `tfa.image.AdjustHue` is an alias.
 
+`adjust_hsv_in_yiq(graph, image, delta_hue, scale_saturation, scale_value,
+options)` follows `tfa.image.adjust_hsv_in_yiq`, applying hue rotation in radians
+and saturation/value scaling in YIQ color space.
+`tfa.image.AdjustHSVInYIQ` is an alias.
+
 `transform(graph, image, transforms, options)` follows `tfa.image.transform`.
 Each transform row is `[a0, a1, a2, b0, b1, b2, c0, c1]` and maps output
 coordinates back into the input. It accepts `options.output_shape`,
 `options.interpolation`, `options.fill_mode`, and `options.fill_value`, and
 supports rank-2 HW, rank-3 HWC, and rank-4 NHWC images.
 `tfa.image.Transform` is an alias.
+
+`compose_transforms(graph, transforms, options)` follows
+`tfa.image.compose_transforms`, multiplying a non-empty list of flat eight-value
+transform vectors or transform-row matrices into one composed transform.
+`tfa.image.ComposeTransforms` is an alias.
+
+`angles_to_projective_transforms(graph, angles, image_height, image_width,
+options)` follows `tfa.image.angles_to_projective_transforms`, converting one
+angle or a list of angles in radians into flat projective transform rows.
+`tfa.image.AnglesToProjectiveTransforms` is an alias.
 
 `cutout(graph, images, mask_size, offset, options)` follows `tfa.image.cutout`
 for rank-4 NHWC images. `mask_size` is a positive even `{height, width}` pair;
@@ -601,9 +635,9 @@ scales from `lower_saturation`/`upper_saturation` and
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
+| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
-| Image | horizontal/vertical flips, brightness, saturation/hue, nearest/bilinear/area resize, `sharpness`, `blend`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
+| Image | horizontal/vertical flips, brightness, saturation/hue, HSV-in-YIQ, nearest/bilinear/area resize, `sharpness`, `blend`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

@@ -1264,4 +1264,180 @@ end
 
 Image.RandomCutout = Image.random_cutout
 
+local function numeric_or_tensor(graph, value, name, dtype)
+  if type(value) == "number" then
+    return tf.constant(graph, value, name, dtype)
+  end
+  return tf.cast(graph, value, value.dtype or dtype, dtype, name)
+end
+
+-- Adjust hue, saturation, and value in YIQ space, following
+-- tfa.image.adjust_hsv_in_yiq.  delta_hue is in radians and the scale factors
+-- are finite positive numbers or scalar graph tensors.
+function Image.adjust_hsv_in_yiq(graph, input, delta_hue, scale_saturation,
+    scale_value, options)
+  options = options or {}
+  local name = options.name or "adjust_hsv_in_yiq"
+  local dtype = options.dtype or input.dtype or "float32"
+  if dtype ~= "float32" and dtype ~= "float64" then
+    error(name .. " requires a float32 or float64 input", 3)
+  end
+  local rank = options.rank or
+    (type(options.input_shape) == "table" and #options.input_shape) or
+    (type(input.shape) == "table" and #input.shape) or 4
+  if rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-3 or rank-4 RGB inputs", 3)
+  end
+  if type(options.input_shape) == "table" and
+      options.input_shape[#options.input_shape] ~= 3 then
+    error(name .. " requires a last dimension of 3", 3)
+  end
+  local delta = numeric_or_tensor(graph, delta_hue,
+    name .. "/delta_hue", dtype)
+  local saturation = numeric_or_tensor(graph, scale_saturation,
+    name .. "/scale_saturation", dtype)
+  local value = numeric_or_tensor(graph, scale_value,
+    name .. "/scale_value", dtype)
+  local cosine = trig(graph, "Cos", delta, name .. "/cos", dtype)
+  local sine = trig(graph, "Sin", delta, name .. "/sin", dtype)
+  local scaled = tf.mul(graph, value, saturation, name .. "/scaled", dtype)
+  local vsu = tf.mul(graph, scaled, cosine, name .. "/vsu", dtype)
+  local vsw = tf.mul(graph, scaled, sine, name .. "/vsw", dtype)
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local negative_one = tf.constant(graph, -1, name .. "/negative_one", dtype)
+  local row_one = tf.stack(graph, { value, zero, zero }, 0,
+    name .. "/row_one", dtype)
+  local row_two = tf.stack(graph, { zero, vsu, vsw }, 0,
+    name .. "/row_two", dtype)
+  local row_three = tf.stack(graph, { zero, tf.mul(graph, negative_one, vsw,
+    name .. "/negative_vsw", dtype), vsu }, 0, name .. "/row_three", dtype)
+  local hsv = tf.stack(graph, { row_one, row_two, row_three }, 0,
+    name .. "/hsv", dtype)
+  local yiq = tf.constant(graph, {
+    { 0.299, 0.596, 0.211 },
+    { 0.587, -0.274, -0.523 },
+    { 0.114, -0.322, 0.312 },
+  }, name .. "/yiq", dtype)
+  local yiq_inverse = tf.constant(graph, {
+    { 1, 1, 1 },
+    { 0.95617069, -0.2726886, -1.103744 },
+    { 0.62143257, -0.64681324, 1.70062309 },
+  }, name .. "/yiq_inverse", dtype)
+  local transform = tf.matmul(graph, tf.matmul(graph, yiq, hsv,
+    name .. "/yiq_hsv", dtype), yiq_inverse, name .. "/transform", dtype)
+  local flat = tf.reshape(graph, input, { -1, 3 }, name .. "/flat", dtype)
+  local transformed = tf.matmul(graph, flat, transform,
+    name .. "/transformed_flat", dtype)
+  local output_shape = tf.shape(graph, input, name .. "/input_shape", dtype)
+  return reshape_dynamic(graph, transformed, output_shape, name, dtype)
+end
+
+Image.AdjustHSVInYIQ = Image.adjust_hsv_in_yiq
+
+local function rows_tensor(graph, transforms, name)
+  if type(transforms) ~= "table" or #transforms == 0 then
+    error(name .. " requires a non-empty transform list", 3)
+  end
+  if type(transforms[1]) == "number" then
+    if #transforms ~= 8 then
+      error(name .. " transform vectors must contain eight numbers", 3)
+    end
+    return tf.constant(graph, { transforms }, name .. "/rows", "float32")
+  end
+  for _, row in ipairs(transforms) do
+    if type(row) ~= "table" or #row ~= 8 then
+      error(name .. " transform rows must contain eight numbers", 3)
+    end
+  end
+  return tf.constant(graph, transforms, name .. "/rows", "float32")
+end
+
+local function flat_to_matrices(graph, rows, name)
+  local zeros = tf.mul(graph, rows, tf.constant(graph, 0, name .. "/zero",
+    "float32"), name .. "/zeros", "float32")
+  local ones = tf.add(graph, zeros, tf.constant(graph, 1, name .. "/one",
+    "float32"), name .. "/ones", "float32")
+  local last_column = tf.slice(graph, ones, { 0, 0 }, { -1, 1 },
+    name .. "/last_column", "float32")
+  local extended = tf.concat(graph, { rows, last_column }, 1,
+    name .. "/extended", "float32")
+  return tf.reshape(graph, extended, { -1, 3, 3 }, name .. "/matrices",
+    "float32")
+end
+
+local function batch_matmul(graph, a, b, name)
+  local desc = graph:new_operation("BatchMatMulV2", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", "float32")
+  desc:set_bool("adj_x", false)
+  desc:set_bool("adj_y", false)
+  return desc:finish()
+end
+
+-- Compose projective transform rows, following tfa.image.compose_transforms.
+-- Each item may be an eight-number vector or a matrix of eight-number rows.
+function Image.compose_transforms(graph, transforms, options)
+  options = options or {}
+  local name = options.name or "compose_transforms"
+  if type(transforms) ~= "table" or #transforms == 0 then
+    error(name .. " requires a non-empty list of transforms", 3)
+  end
+  local composed
+  for index, value in ipairs(transforms) do
+    local rows = rows_tensor(graph, value, name .. "/transform_" .. index)
+    local matrices = flat_to_matrices(graph, rows,
+      name .. "/matrices_" .. index)
+    if composed == nil then
+      composed = matrices
+    else
+      composed = batch_matmul(graph, composed, matrices,
+        name .. "/composed_" .. index)
+    end
+  end
+  local flat = tf.reshape(graph, composed, { -1, 9 }, name .. "/flat",
+    "float32")
+  local linear = tf.slice(graph, flat, { 0, 0 }, { -1, 8 },
+    name .. "/linear", "float32")
+  local scale = tf.slice(graph, flat, { 0, 8 }, { -1, 1 },
+    name .. "/scale", "float32")
+  return tf.div(graph, linear, scale, name, "float32")
+end
+
+Image.ComposeTransforms = Image.compose_transforms
+
+-- Convert angles in radians to projective transform rows, following
+-- tfa.image.angles_to_projective_transforms.
+function Image.angles_to_projective_transforms(graph, angles, image_height,
+    image_width, options)
+  options = options or {}
+  local name = options.name or "angles_to_projective_transforms"
+  if type(image_height) ~= "number" or image_height <= 0 or
+      type(image_width) ~= "number" or image_width <= 0 then
+    error(name .. " requires positive image dimensions", 3)
+  end
+  local values = angles
+  if type(angles) == "number" then values = { angles } end
+  if type(values) ~= "table" or #values == 0 then
+    error(name .. " requires an angle or list of angles", 3)
+  end
+  local rows = {}
+  for index, angle in ipairs(values) do
+    if type(angle) ~= "number" or angle ~= angle or angle == math.huge or
+        angle == -math.huge then
+      error(name .. " angles must be finite numbers", 3)
+    end
+    local cosine = math.cos(angle)
+    local sine = math.sin(angle)
+    local x_offset = ((image_width - 1) - (cosine * (image_width - 1) -
+      sine * (image_height - 1))) / 2
+    local y_offset = ((image_height - 1) - (sine * (image_width - 1) +
+      cosine * (image_height - 1))) / 2
+    rows[index] = { cosine, -sine, x_offset, sine, cosine, y_offset, 0, 0 }
+  end
+  return tf.constant(graph, rows, name, "float32")
+end
+
+Image.AnglesToProjectiveTransforms = Image.angles_to_projective_transforms
+
 return Image

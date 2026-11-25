@@ -12,7 +12,11 @@
 - `blend` image helper with interpolating and extrapolating factors;
 - geometric and harmonic mean metrics;
 - `class_id` selection for precision, recall, and F1 score;
-- 95 graph-mode tests.
+- adaptive average and max 1D pooling layers;
+- `adjust_hsv_in_yiq` color adjustment helper;
+- `compose_transforms` helper for projective transform composition;
+- `angles_to_projective_transforms` helper for rotation matrices;
+- 100 graph-mode tests.
 
 ## 0.17.0
 

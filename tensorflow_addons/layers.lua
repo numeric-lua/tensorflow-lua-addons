@@ -1108,4 +1108,51 @@ end
 
 Layers.AdaptiveMaxPooling2D = Layers.adaptive_max_pooling_2d
 
+local function pooling_1d(graph, input, output_size, options, reduce,
+    reducer_name)
+  options = options or {}
+  local name = options.name or reducer_name .. "_pooling_1d"
+  local dtype = options.dtype or input.dtype or "float32"
+  local data_format = options.data_format or "channels_last"
+  if data_format ~= "channels_last" and data_format ~= "channels_first" then
+    error(name .. " data_format must be channels_last or channels_first", 3)
+  end
+  local bins = output_size
+  if type(bins) ~= "number" or bins % 1 ~= 0 or bins < 1 then
+    error(name .. " output_size must be a positive integer", 3)
+  end
+  local input_shape = options.input_shape or input.shape
+  local length
+  if type(input_shape) == "table" then
+    if #input_shape ~= 3 then
+      error(name .. " requires rank-3 inputs", 3)
+    end
+    length = data_format == "channels_last" and input_shape[2] or
+      input_shape[3]
+    if length % bins ~= 0 then
+      error(name .. " input length must be divisible by output_size", 3)
+    end
+  end
+  local length_axis = data_format == "channels_last" and 1 or 2
+  local splits = tf.split(graph, input, bins, length_axis, name .. "/splits",
+    dtype)
+  local cells = tf.stack(graph, splits, length_axis, name .. "/stack", dtype)
+  return reduce(graph, cells, { length_axis + 1 }, name .. "/output", dtype,
+    false)
+end
+
+function Layers.adaptive_average_pooling_1d(graph, input, output_size, options)
+  return pooling_1d(graph, input, output_size, options, tf.reduce_mean,
+    "adaptive_average")
+end
+
+Layers.AdaptiveAveragePooling1D = Layers.adaptive_average_pooling_1d
+
+function Layers.adaptive_max_pooling_1d(graph, input, output_size, options)
+  return pooling_1d(graph, input, output_size, options, tf.reduce_max,
+    "adaptive_max")
+end
+
+Layers.AdaptiveMaxPooling1D = Layers.adaptive_max_pooling_1d
+
 return Layers
