@@ -900,4 +900,144 @@ end
 
 Layers.PolynomialCrossing = Layers.polynomial_crossing
 
+local function dynamic_reshape(graph, input, shape, name, dtype)
+  local desc = graph:new_operation("Reshape", name)
+  desc:add_input(input)
+  desc:add_input(shape)
+  desc:set_type("T", dtype)
+  desc:set_type("Tshape", "int32")
+  return desc:finish()
+end
+
+local function sparsemax_last(graph, logits, name, dtype, rank)
+  local shape = tf.shape(graph, logits, name .. "/shape", dtype)
+  local prefix = tf.slice(graph, shape, { 0 }, { rank - 1 },
+    name .. "/prefix", "int32")
+  local observations = tf.reduce_prod(graph, prefix, { 0 },
+    name .. "/observations", "int32", false)
+  local dimensions = tf.gather(graph, shape,
+    tf.constant(graph, rank - 1, name .. "/dimension_index", "int32"), 0,
+    name .. "/dimensions", "int32")
+  local matrix_shape = tf.stack(graph, { observations, dimensions }, 0,
+    name .. "/matrix_shape", "int32")
+  local z = dynamic_reshape(graph, logits, matrix_shape, name .. "/matrix",
+    dtype)
+  local top_desc = graph:new_operation("TopKV2", name .. "/top_k")
+  top_desc:add_input(z)
+  top_desc:add_input(dimensions)
+  top_desc:set_type("T", dtype)
+  top_desc:set_bool("sorted", true)
+  local top = top_desc:finish()
+  local z_sorted = { oper = top.oper, index = 0, name = name .. "/top_k:0",
+    dtype = dtype }
+  local cumsum_desc = graph:new_operation("Cumsum", name .. "/cumsum")
+  cumsum_desc:add_input(z_sorted)
+  cumsum_desc:add_input(tf.constant(graph, -1, name .. "/cumsum_axis",
+    "int32"))
+  cumsum_desc:set_type("T", dtype)
+  cumsum_desc:set_type("Tidx", "int32")
+  cumsum_desc:set_bool("exclusive", false)
+  cumsum_desc:set_bool("reverse", false)
+  local z_cumsum = cumsum_desc:finish()
+  local range_desc = graph:new_operation("Range", name .. "/range")
+  range_desc:add_input(tf.constant(graph, 0, name .. "/range_start", "int32"))
+  range_desc:add_input(dimensions)
+  range_desc:add_input(tf.constant(graph, 1, name .. "/range_delta", "int32"))
+  range_desc:set_type("Tidx", "int32")
+  local indices = range_desc:finish()
+  local k = tf.add(graph, tf.cast(graph, indices, "int32", dtype,
+    name .. "/range_float"), tf.constant(graph, 1, name .. "/one", dtype),
+    name .. "/k", dtype)
+  local one_plus = tf.add(graph, tf.constant(graph, 1, name .. "/one_plus",
+    dtype), tf.mul(graph, k, z_sorted, name .. "/weighted_sorted", dtype),
+    name .. "/one_plus_weighted", dtype)
+  local comparison = Ops.greater(graph, one_plus, z_cumsum,
+    name .. "/comparison", dtype)
+  local comparison_int = tf.cast(graph, comparison, "bool", "int32",
+    name .. "/comparison_int")
+  local k_z = tf.reduce_sum(graph, comparison_int, { 1 }, name .. "/k_z",
+    "int32", false)
+  local k_safe = Ops.maximum(graph, k_z,
+    tf.constant(graph, 1, name .. "/k_one", "int32"), name .. "/k_safe",
+    "int32")
+  local observation_range_desc = graph:new_operation("Range",
+    name .. "/observation_range")
+  observation_range_desc:add_input(tf.constant(graph, 0,
+    name .. "/observation_start", "int32"))
+  observation_range_desc:add_input(observations)
+  observation_range_desc:add_input(tf.constant(graph, 1,
+    name .. "/observation_delta", "int32"))
+  observation_range_desc:set_type("Tidx", "int32")
+  local observation_indices = observation_range_desc:finish()
+  local gather_indices = tf.stack(graph, {
+    observation_indices,
+    tf.sub(graph, k_safe, tf.constant(graph, 1, name .. "/index_one",
+      "int32"), name .. "/k_index", "int32"),
+  }, 1, name .. "/gather_indices", "int32")
+  local gather_desc = graph:new_operation("GatherNd", name .. "/gather")
+  gather_desc:add_input(z_cumsum)
+  gather_desc:add_input(gather_indices)
+  gather_desc:set_type("Tparams", dtype)
+  gather_desc:set_type("Tindices", "int32")
+  local tau_sum = gather_desc:finish()
+  local tau = tf.div(graph, tf.sub(graph, tau_sum,
+    tf.constant(graph, 1, name .. "/tau_one", dtype), name .. "/tau_numerator",
+    dtype), tf.cast(graph, k_z, "int32", dtype, name .. "/k_z_float"),
+    name .. "/tau", dtype)
+  local shifted = tf.sub(graph, z, tf.expand_dims(graph, tau, 1,
+    name .. "/tau_expanded", dtype), name .. "/shifted", dtype)
+  local sparse = Ops.maximum(graph, shifted,
+    tf.constant(graph, 0, name .. "/sparse_zero", dtype), name .. "/sparse",
+    dtype)
+  local original_shape = tf.shape(graph, logits, name .. "/original_shape",
+    dtype)
+  return dynamic_reshape(graph, sparse, original_shape, name .. "/output",
+    dtype)
+end
+
+-- Sparsemax activation, following tfa.layers.Sparsemax.  The projection is
+-- applied along options.axis (default last) using a stable sort/cumsum.
+function Layers.sparsemax(graph, input, options)
+  options = options or {}
+  local name = options.name or "sparsemax"
+  local dtype = options.dtype or input.dtype or "float32"
+  if dtype ~= "float32" and dtype ~= "float64" then
+    error(name .. " requires a float32 or float64 input", 3)
+  end
+  local input_shape = options.input_shape or input.shape
+  local rank = type(input_shape) == "table" and #input_shape or 2
+  if rank < 2 then
+    error(name .. " requires an input of rank at least 2", 3)
+  end
+  local axis = options.axis or -1
+  if type(axis) ~= "number" or axis % 1 ~= 0 then
+    error(name .. " axis must be an integer", 3)
+  end
+  if axis < 0 then axis = axis + rank end
+  if axis < 0 or axis >= rank then
+    error(name .. " axis is out of range", 3)
+  end
+  if axis == rank - 1 then
+    return {
+      output = sparsemax_last(graph, input, name, dtype, rank),
+      axis = axis,
+    }
+  end
+  local perm = {}
+  for index = 0, rank - 1 do
+    if index ~= axis then perm[#perm + 1] = index end
+  end
+  perm[#perm + 1] = axis
+  local inverse = {}
+  for index = 1, rank do inverse[perm[index] + 1] = index - 1 end
+  local transposed = tf.transpose(graph, input, perm, name .. "/transpose",
+    dtype)
+  local output = sparsemax_last(graph, transposed, name .. "/projected", dtype,
+    rank)
+  output = tf.transpose(graph, output, inverse, name .. "/output", dtype)
+  return { output = output, axis = axis }
+end
+
+Layers.Sparsemax = Layers.sparsemax
+
 return Layers

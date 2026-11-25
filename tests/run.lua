@@ -2081,6 +2081,129 @@ test("Yogi matches its first adaptive update", function()
   session:close()
 end)
 
+test("transform applies projective rows and output shapes", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "transform_input")
+  local identity = tfa.image.transform(graph, input,
+    { 1, 0, 0, 0, 1, 0, 0, 0 }, { name = "transform_identity" })
+  local shifted = tfa.image.transform(graph, input,
+    { 1, 0, -1, 0, 1, 0, 0, 0 }, { name = "transform_shift" })
+  local resized = tfa.image.transform(graph, input,
+    { 1, 0, 0, 0, 1, 0, 0, 0 },
+    { name = "transform_resize", output_shape = { 3, 3 } })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { { { { 1 }, { 2 } },
+    { { 3 }, { 4 } } } } }, { identity, shifted, resized })
+  near(values[1]:totable()[1][1][1][1], 1, 0, "transform identity")
+  near(values[2]:totable()[1][1][1][1], 0, 0, "transform shift fill")
+  near(values[2]:totable()[1][1][2][1], 1, 0, "transform shift value")
+  assert_eq(table.concat(values[3]:shape(), ","), "1,3,3,1")
+  assert_true(tfa.image.Transform == tfa.image.transform)
+  session:close()
+end)
+
+test("cutout masks a requested rectangle", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 3, 3, 1 },
+    "cutout_input")
+  local output = tfa.image.cutout(graph, input, { 2, 2 }, { 1, 1 },
+    { name = "cutout", constant_values = 9 })
+  local values = run(graph, { [input] = { {
+    { { 1 }, { 2 }, { 3 } },
+    { { 4 }, { 5 }, { 6 } },
+    { { 7 }, { 8 }, { 9 } },
+  } } }, output)[1]
+  local expected = {
+    { 9, 9, 3 },
+    { 9, 9, 6 },
+    { 7, 8, 9 },
+  }
+  for row = 1, 3 do
+    for column = 1, 3 do
+      near(values[row][column][1], expected[row][column], 0,
+        "cutout " .. row .. "," .. column)
+    end
+  end
+  assert_true(tfa.image.Cutout == tfa.image.cutout)
+end)
+
+test("random_cutout masks each batch image", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 4, 4, 1 },
+    "random_cutout_input")
+  local output = tfa.image.random_cutout(graph, input, { 2, 2 },
+    { name = "random_cutout", constant_values = 0, seed = 7 })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = {
+    { { { 1 }, { 1 }, { 1 }, { 1 } }, { { 1 }, { 1 }, { 1 }, { 1 } },
+      { { 1 }, { 1 }, { 1 }, { 1 } }, { { 1 }, { 1 }, { 1 }, { 1 } } },
+    { { { 1 }, { 1 }, { 1 }, { 1 } }, { { 1 }, { 1 }, { 1 }, { 1 } },
+      { { 1 }, { 1 }, { 1 }, { 1 } }, { { 1 }, { 1 }, { 1 }, { 1 } } },
+  } }, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "2,4,4,1")
+  local zeros = 0
+  for batch = 1, 2 do
+    for row = 1, 4 do
+      for column = 1, 4 do
+        if values:totable()[batch][row][column][1] == 0 then
+          zeros = zeros + 1
+        end
+      end
+    end
+  end
+  assert_eq(zeros, 8)
+  assert_true(tfa.image.RandomCutout == tfa.image.random_cutout)
+  session:close()
+end)
+
+test("adjust_hue rotates normalized hue values", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "hue_input")
+  local identity = tfa.image.adjust_hue(graph, input, 0, "hue_identity")
+  local rotated = tfa.image.adjust_hue(graph, input, 1 / 3, "hue_rotated")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { { { { 1, 0, 0 } } } } },
+    { identity, rotated })
+  local original = values[1]:totable()[1][1][1]
+  local changed = values[2]:totable()[1][1][1]
+  near(original[1], 1, 0, "hue identity red")
+  near(original[2], 0, 0, "hue identity green")
+  near(changed[1], 0, 1e-6, "hue rotation red")
+  near(changed[2], 1, 1e-6, "hue rotation green")
+  near(changed[3], 0, 1e-6, "hue rotation blue")
+  assert_true(tfa.image.AdjustHue == tfa.image.adjust_hue)
+  session:close()
+end)
+
+test("sparsemax produces sparse probability rows", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 3 }, "sparsemax_input")
+  local layer = tfa.layers.sparsemax(graph, input,
+    { input_shape = { 2, 3 }, name = "sparsemax" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = {
+    { -1, 0, 1 },
+    { -5, 1, 2 },
+  } }, { layer.output })[1]:totable()
+  local expected = {
+    { 0, 0, 1 },
+    { 0, 0, 1 },
+  }
+  for row = 1, 2 do
+    local total = 0
+    for column = 1, 3 do
+      near(values[row][column], expected[row][column], 1e-6,
+        "sparsemax " .. row .. "," .. column)
+      total = total + values[row][column]
+    end
+    near(total, 1, 1e-6, "sparsemax row sum")
+  end
+  assert_true(tfa.layers.Sparsemax == tfa.layers.sparsemax)
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -2244,6 +2367,29 @@ test("new parity options reject invalid values", function()
     { { ref = input } }, { beta1 = 1 })
   assert_true(not invalid_yogi_beta,
     "Yogi should reject beta1 outside [0, 1)")
+  local invalid_transform = pcall(tfa.image.transform, graph, input,
+    { 1, 0, 0 })
+  assert_true(not invalid_transform,
+    "transform should reject rows without eight entries")
+  local invalid_output_shape = pcall(tfa.image.transform, graph, input,
+    { 1, 0, 0, 0, 1, 0, 0, 0 }, { output_shape = { 0, 2 } })
+  assert_true(not invalid_output_shape,
+    "transform should reject non-positive output sizes")
+  local invalid_cutout = pcall(tfa.image.cutout, graph, input, { 3, 2 },
+    { 1, 1 })
+  assert_true(not invalid_cutout,
+    "cutout should reject odd mask dimensions")
+  local invalid_random_cutout = pcall(tfa.image.random_cutout, graph, input,
+    { 2, 2 }, { constant_values = math.huge })
+  assert_true(not invalid_random_cutout,
+    "random_cutout should reject non-finite fill values")
+  local invalid_hue = pcall(tfa.image.adjust_hue, graph, input, math.huge)
+  assert_true(not invalid_hue,
+    "adjust_hue should reject non-finite deltas")
+  local invalid_sparsemax = pcall(tfa.layers.sparsemax, graph, input,
+    { input_shape = { 1, 3, 3, 1 }, axis = 8 })
+  assert_true(not invalid_sparsemax,
+    "sparsemax should reject out-of-range axes")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

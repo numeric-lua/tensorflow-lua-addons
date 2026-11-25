@@ -73,6 +73,7 @@ local ball = tfa.layers.poincare_normalize(graph, input, { axis = 1 })
 local thresholded = tfa.layers.tlu(graph, input, { input_shape = { 8, 16 } })
 local crossed = tfa.layers.polynomial_crossing(graph, x0, x,
   { input_shape = { 8, 16 } })
+local sparse = tfa.layers.sparsemax(graph, input, { input_shape = { 8, 16 } })
 local noisy = tfa.layers.noisy_dense(graph, input, 32,
   { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
@@ -92,6 +93,11 @@ local rotated = tfa.image.rotate(graph, image, math.pi / 4,
 local recolored = tfa.image.random_hsv_in_yiq(graph, image,
   { max_delta_hue = 0.1, lower_saturation = 0.8, upper_saturation = 1.2 })
 local muted = tfa.image.adjust_saturation(graph, image, 0.5)
+local hued = tfa.image.adjust_hue(graph, image, 0.25)
+local transformed = tfa.image.transform(graph, image,
+  { 1, 0, 0, 0, 1, 0, 0, 0 })
+local cut = tfa.image.cutout(graph, image, { 4, 4 }, { 8, 8 })
+local random_cut = tfa.image.random_cutout(graph, image, { 4, 4 })
 local small = tfa.image.bilinear_resize(graph, image, 4, 4)
 local pooled = tfa.image.area_resize(graph, image, 4, 4)
 local sharpened = tfa.image.sharpness(graph, image, 0.5)
@@ -303,6 +309,7 @@ Classification metrics accept `options.name` for the graph namespace.
 - `poincare_normalize`
 - `tlu`
 - `polynomial_crossing`
+- `sparsemax`
 - `noisy_dense`
 - `stochastic_depth`
 
@@ -343,6 +350,11 @@ and `initializers`. `tfa.layers.TLU` is an alias.
 low-rank factorization, `options.diag_scale`, and `options.use_bias`. The
 result exposes `output`, the kernel variables, `bias`, `variables`, and
 `initializers`. `tfa.layers.PolynomialCrossing` is an alias.
+
+`sparsemax(graph, input, options)` follows `tfa.layers.Sparsemax`, projecting
+logits onto the probability simplex along `options.axis` (default last). The
+result exposes `output` and the resolved `axis`. `tfa.layers.Sparsemax` is an
+alias.
 
 `noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
 it learns mean and sigma kernel/bias variables and multiplies the sigma terms
@@ -427,6 +439,10 @@ the resolved `sync_period`/`slow_step_size`.
 - `flip_up_down`
 - `adjust_brightness`
 - `adjust_saturation`
+- `adjust_hue`
+- `transform`
+- `cutout`
+- `random_cutout`
 - `resize_nearest`
 - `bilinear_resize`
 - `area_resize`
@@ -442,6 +458,25 @@ the resolved `sync_period`/`slow_step_size`.
 `adjust_saturation(graph, image, saturation, name)` scales HSV saturation,
 following `tf.image.adjust_saturation`: `0` produces grayscale and `1`
 preserves the image. `tfa.image.AdjustSaturation` is an alias.
+
+`adjust_hue(graph, image, delta, name)` rotates hue by a normalized delta,
+following `tf.image.adjust_hue`. `tfa.image.AdjustHue` is an alias.
+
+`transform(graph, image, transforms, options)` follows `tfa.image.transform`.
+Each transform row is `[a0, a1, a2, b0, b1, b2, c0, c1]` and maps output
+coordinates back into the input. It accepts `options.output_shape`,
+`options.interpolation`, `options.fill_mode`, and `options.fill_value`, and
+supports rank-2 HW, rank-3 HWC, and rank-4 NHWC images.
+`tfa.image.Transform` is an alias.
+
+`cutout(graph, images, mask_size, offset, options)` follows `tfa.image.cutout`
+for rank-4 NHWC images. `mask_size` is a positive even `{height, width}` pair;
+`offset` is a center pair shared by the batch or one pair per image.
+`options.constant_values` controls the fill. `tfa.image.Cutout` is an alias.
+
+`random_cutout(graph, images, mask_size, options)` follows
+`tfa.image.random_cutout`, sampling a per-image center using
+`options.seed`/`options.seed2`. `tfa.image.RandomCutout` is an alias.
 
 `bilinear_resize(graph, image, height, width, name, options)` resizes rank-4
 NHWC images with bilinear interpolation. By default it uses half-pixel centers,
@@ -519,9 +554,9 @@ scales from `lower_saturation`/`upper_saturation` and
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `multiclass_f1` | class-id variants and further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
+| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient and further wrappers |
-| Image | horizontal/vertical flips, brightness, saturation, nearest/bilinear/area resize, `sharpness`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `translate`, `rotate`, `random_hsv_in_yiq` | further color transforms and warps |
+| Image | horizontal/vertical flips, brightness, saturation/hue, nearest/bilinear/area resize, `sharpness`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

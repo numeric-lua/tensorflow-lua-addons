@@ -45,6 +45,24 @@ end
 
 Image.AdjustSaturation = Image.adjust_saturation
 
+-- Rotate hue, following tf.image.adjust_hue.  The delta is expressed in the
+-- same normalized hue units as TensorFlow's helper (usually [-1, 1]).
+function Image.adjust_hue(graph, input, delta, name)
+  name = name or "adjust_hue"
+  local dtype = input.dtype or "float32"
+  if type(delta) ~= "number" or delta ~= delta or delta == math.huge or
+      delta == -math.huge then
+    error("adjust_hue requires a finite hue delta", 3)
+  end
+  local desc = graph:new_operation("AdjustHue", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, delta, name .. "/delta", "float32"))
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+Image.AdjustHue = Image.adjust_hue
+
 local function validate_resize_dimensions(height, width, name)
   for _, value in ipairs({ height, width }) do
     if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
@@ -320,10 +338,15 @@ local function from_4d_image(graph, input, rank, name, dtype)
 end
 
 local function apply_projective_transform(graph, image, transforms,
-    interpolation, fill_mode, fill_value, name, dtype)
-  local shape = tf.shape(graph, image, name .. "/transform_shape", dtype)
-  local output_shape = tf.slice(graph, shape, { 1 }, { 2 },
-    name .. "/output_shape", "int32")
+    interpolation, fill_mode, fill_value, output_shape, name, dtype)
+  if output_shape == nil then
+    local shape = tf.shape(graph, image, name .. "/transform_shape", dtype)
+    output_shape = tf.slice(graph, shape, { 1 }, { 2 },
+      name .. "/output_shape", "int32")
+  else
+    output_shape = tf.constant(graph, output_shape, name .. "/output_shape",
+      "int32")
+  end
   local desc = graph:new_operation("ImageProjectiveTransformV3",
     name .. "/transform")
   desc:add_input(image)
@@ -708,7 +731,7 @@ function Image.translate(graph, input, translations, options)
   local image = to_4d_image(graph, input, rank, name .. "/image", dtype)
   local transforms = tf.constant(graph, rows, name .. "/transforms", "float32")
   local output = apply_projective_transform(graph, image, transforms,
-    interpolation, fill_mode, fill_value, name, dtype)
+    interpolation, fill_mode, fill_value, nil, name, dtype)
   return from_4d_image(graph, output, rank, name, dtype)
 end
 
@@ -723,6 +746,68 @@ local function validate_transform_mode(interpolation, fill_mode, name)
     error(name .. " fill_mode must be constant, reflect, wrap, or nearest", 3)
   end
 end
+
+-- Apply explicit projective transforms, following tfa.image.transform.  A
+-- transform row is [a0, a1, a2, b0, b1, b2, c0, c1] and maps output
+-- coordinates back into the input image.
+function Image.transform(graph, input, transforms, options)
+  options = options or {}
+  local name = options.name or "transform"
+  local dtype = options.dtype or input.dtype or "float32"
+  local rank = options.rank or
+    (type(options.input_shape) == "table" and #options.input_shape) or
+    (type(input.shape) == "table" and #input.shape) or 4
+  if rank ~= 2 and rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-2, rank-3, or rank-4 inputs", 3)
+  end
+  if type(transforms) ~= "table" or #transforms == 0 then
+    error(name .. " requires a transform vector or a list of transform rows", 3)
+  end
+  local rows
+  if type(transforms[1]) == "number" then
+    rows = { transforms }
+  else
+    rows = transforms
+  end
+  for _, row in ipairs(rows) do
+    if type(row) ~= "table" or #row ~= 8 then
+      error(name .. " transform rows must contain eight numbers", 3)
+    end
+    for _, value in ipairs(row) do
+      if type(value) ~= "number" or value ~= value or
+          value == math.huge or value == -math.huge then
+        error(name .. " transform entries must be finite numbers", 3)
+      end
+    end
+  end
+  local interpolation = string.upper(options.interpolation or "nearest")
+  local fill_mode = string.upper(options.fill_mode or "constant")
+  validate_transform_mode(interpolation, fill_mode, name)
+  local fill_value = options.fill_value or 0
+  if type(fill_value) ~= "number" or fill_value ~= fill_value or
+      fill_value == math.huge or fill_value == -math.huge then
+    error(name .. " fill_value must be a finite number", 3)
+  end
+  local output_shape = options.output_shape
+  if output_shape ~= nil then
+    if type(output_shape) ~= "table" or #output_shape ~= 2 then
+      error(name .. " output_shape must be {height, width}", 3)
+    end
+    for _, value in ipairs(output_shape) do
+      if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+        error(name .. " output_shape entries must be positive integers", 3)
+      end
+    end
+  end
+  local image = to_4d_image(graph, input, rank, name .. "/image", dtype)
+  local transform_tensor = tf.constant(graph, rows, name .. "/transforms",
+    "float32")
+  local output = apply_projective_transform(graph, image, transform_tensor,
+    interpolation, fill_mode, fill_value, output_shape, name, dtype)
+  return from_4d_image(graph, output, rank, name, dtype)
+end
+
+Image.Transform = Image.transform
 
 -- Rotate rank-2, rank-3, or rank-4 images counterclockwise by radians,
 -- following tfa.image.rotate.  A scalar angle applies to the whole input; a
@@ -812,7 +897,7 @@ function Image.rotate(graph, input, angles, options)
     transforms = tf.stack(graph, rows, 0, name .. "/transforms", "float32")
   end
   local output = apply_projective_transform(graph, image, transforms,
-    interpolation, fill_mode, fill_value, name, dtype)
+    interpolation, fill_mode, fill_value, nil, name, dtype)
   return from_4d_image(graph, output, rank, name, dtype)
 end
 
@@ -921,5 +1006,227 @@ function Image.random_hsv_in_yiq(graph, input, options)
 end
 
 Image.RandomHSVInYIQ = Image.random_hsv_in_yiq
+
+local function range_int32(graph, limit, name)
+  local desc = graph:new_operation("Range", name)
+  desc:add_input(tf.constant(graph, 0, name .. "/start", "int32"))
+  desc:add_input(limit)
+  desc:add_input(tf.constant(graph, 1, name .. "/delta", "int32"))
+  desc:set_type("Tidx", "int32")
+  return desc:finish()
+end
+
+local function tile_dynamic(graph, input, multiples, name, dtype)
+  local values = {}
+  for index, value in ipairs(multiples) do
+    if type(value) == "number" then
+      values[index] = tf.constant(graph, value,
+        name .. "/multiple_" .. index, "int32")
+    else
+      values[index] = value
+    end
+  end
+  local desc = graph:new_operation("Tile", name)
+  desc:add_input(input)
+  desc:add_input(pack_int32(graph, values, name .. "/multiples"))
+  desc:set_type("T", dtype)
+  desc:set_type("Tmultiples", "int32")
+  return desc:finish()
+end
+
+local function random_uniform_vector(graph, shape, name, dtype, seed, seed2)
+  local desc = graph:new_operation("RandomUniform", name)
+  desc:add_input(shape)
+  desc:set_type("dtype", dtype)
+  desc:set_int("seed", seed or 0)
+  desc:set_int("seed2", seed2 or 0)
+  return desc:finish()
+end
+
+local function floor_float(graph, input, name, dtype)
+  local desc = graph:new_operation("Floor", name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+local function cutout_mask(graph, images, mask_size, center_y, center_x,
+    constant_values, name, dtype)
+  local shape = tf.shape(graph, images, name .. "/shape", dtype)
+  local function dimension(index, label)
+    return tf.gather(graph, shape,
+      tf.constant(graph, index, name .. "/" .. label .. "_index", "int32"), 0,
+      name .. "/" .. label, "int32")
+  end
+  local height = dimension(1, "height")
+  local width = dimension(2, "width")
+  local channels = dimension(3, "channels")
+  local half_h = math.floor(mask_size[1] / 2)
+  local half_w = math.floor(mask_size[2] / 2)
+  local zero_int = tf.constant(graph, 0, name .. "/zero_int", "int32")
+  local half_h_op = tf.constant(graph, half_h, name .. "/half_h", "int32")
+  local half_w_op = tf.constant(graph, half_w, name .. "/half_w", "int32")
+  local lower_y = tf.maximum(graph, tf.sub(graph, center_y, half_h_op,
+    name .. "/lower_y_raw", "int32"), zero_int, name .. "/lower_y", "int32")
+  local upper_y = tf.minimum(graph, tf.add(graph, center_y, half_h_op,
+    name .. "/upper_y_raw", "int32"), height, name .. "/upper_y", "int32")
+  local lower_x = tf.maximum(graph, tf.sub(graph, center_x, half_w_op,
+    name .. "/lower_x_raw", "int32"), zero_int, name .. "/lower_x", "int32")
+  local upper_x = tf.minimum(graph, tf.add(graph, center_x, half_w_op,
+    name .. "/upper_x_raw", "int32"), width, name .. "/upper_x", "int32")
+  local lower_y_4d = tf.reshape(graph, lower_y, { -1, 1, 1, 1 },
+    name .. "/lower_y_4d", "int32")
+  local upper_y_4d = tf.reshape(graph, upper_y, { -1, 1, 1, 1 },
+    name .. "/upper_y_4d", "int32")
+  local lower_x_4d = tf.reshape(graph, lower_x, { -1, 1, 1, 1 },
+    name .. "/lower_x_4d", "int32")
+  local upper_x_4d = tf.reshape(graph, upper_x, { -1, 1, 1, 1 },
+    name .. "/upper_x_4d", "int32")
+  local y = tf.reshape(graph, range_int32(graph, height, name .. "/y_range"),
+    { 1, -1, 1, 1 }, name .. "/y", "int32")
+  local x = tf.reshape(graph, range_int32(graph, width, name .. "/x_range"),
+    { 1, 1, -1, 1 }, name .. "/x", "int32")
+  local inside_y = tf.logical_and(graph, tf.greater_equal(graph, y, lower_y_4d,
+    name .. "/inside_y_start", "int32"), tf.less(graph, y, upper_y_4d,
+    name .. "/inside_y_end", "int32"), name .. "/inside_y")
+  local inside_x = tf.logical_and(graph, tf.greater_equal(graph, x, lower_x_4d,
+    name .. "/inside_x_start", "int32"), tf.less(graph, x, upper_x_4d,
+    name .. "/inside_x_end", "int32"), name .. "/inside_x")
+  local mask = tf.logical_and(graph, inside_y, inside_x, name .. "/mask")
+  mask = tile_dynamic(graph, mask, { 1, 1, 1, channels }, name .. "/mask_tile",
+    "bool")
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local fill = tf.add(graph, tf.mul(graph, images, zero, name .. "/fill_base",
+    dtype), tf.constant(graph, constant_values, name .. "/fill_value", dtype),
+    name .. "/fill", dtype)
+  return tf.where(graph, mask, fill, images, name .. "/output", dtype)
+end
+
+local function cutout_args(offset)
+  if type(offset) == "table" and type(offset[1]) == "number" then
+    return { offset }, true
+  end
+  return offset, false
+end
+
+-- Apply a rectangular cutout mask with an explicit center offset per image,
+-- following tfa.image.cutout.  Images must be rank-4 NHWC.
+function Image.cutout(graph, images, mask_size, offset, options)
+  options = options or {}
+  local name = options.name or "cutout"
+  local dtype = options.dtype or images.dtype or "float32"
+  if type(mask_size) ~= "table" or #mask_size ~= 2 then
+    error(name .. " requires mask_size = {height, width}", 3)
+  end
+  for _, value in ipairs(mask_size) do
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 2 or
+        value % 2 ~= 0 then
+      error(name .. " mask dimensions must be positive even integers", 3)
+    end
+  end
+  local rows, single = cutout_args(offset or { 0, 0 })
+  if type(rows) ~= "table" or #rows == 0 then
+    error(name .. " offset must be a pair or a list of pairs", 3)
+  end
+  local values = {}
+  for index, pair in ipairs(rows) do
+    if type(pair) ~= "table" or #pair ~= 2 or
+        type(pair[1]) ~= "number" or type(pair[2]) ~= "number" or
+        pair[1] % 1 ~= 0 or pair[2] % 1 ~= 0 then
+      error(name .. " offsets must be integer [height, width] pairs", 3)
+    end
+    values[index] = pair
+  end
+  local constant_values = options.constant_values or 0
+  if type(constant_values) ~= "number" or constant_values ~= constant_values
+      or constant_values == math.huge or constant_values == -math.huge then
+    error(name .. " constant_values must be a finite number", 3)
+  end
+  if type(images.dtype) == "string" and not images.dtype:match("^float") then
+    error(name .. " currently supports floating point images", 3)
+  end
+  local offset_tensor = tf.constant(graph, values, name .. "/offsets", "int32")
+  local center_y = tf.gather(graph, offset_tensor,
+    tf.constant(graph, 0, name .. "/center_height_index", "int32"), 1,
+    name .. "/center_y", "int32")
+  local center_x = tf.gather(graph, offset_tensor,
+    tf.constant(graph, 1, name .. "/center_width_index", "int32"), 1,
+    name .. "/center_x", "int32")
+  if single then
+    local shape = tf.shape(graph, images, name .. "/batch_shape", dtype)
+    local batch = tf.gather(graph, shape,
+      tf.constant(graph, 0, name .. "/batch_index", "int32"), 0,
+      name .. "/batch", "int32")
+    center_y = tile_dynamic(graph, center_y, { batch }, name .. "/center_y_tile",
+      "int32")
+    center_x = tile_dynamic(graph, center_x, { batch }, name .. "/center_x_tile",
+      "int32")
+  end
+  return cutout_mask(graph, images, mask_size, center_y, center_x,
+    constant_values, name, dtype)
+end
+
+Image.Cutout = Image.cutout
+
+local function random_center(graph, image_dimension, mask_dimension, batch,
+    name, seed, seed2)
+  local half = math.floor(mask_dimension / 2)
+  local half_op = tf.constant(graph, half, name .. "/half", "int32")
+  local upper = tf.maximum(graph, tf.sub(graph, image_dimension, half_op,
+    name .. "/upper_raw", "int32"), tf.add(graph, half_op,
+    tf.constant(graph, 1, name .. "/one", "int32"), name .. "/lower_bound",
+    "int32"), name .. "/upper", "int32")
+  local span = tf.maximum(graph, tf.sub(graph, upper, half_op,
+    name .. "/span_raw", "int32"), tf.constant(graph, 1, name .. "/span_one",
+    "int32"), name .. "/span", "int32")
+  local shape = pack_int32(graph, { batch }, name .. "/batch_shape")
+  local unit = random_uniform_vector(graph, shape, name .. "/unit", "float32",
+    seed, seed2)
+  local scaled = tf.mul(graph, unit, tf.cast(graph, span, "int32", "float32",
+    name .. "/span_float"), name .. "/scaled", "float32")
+  local offset = tf.cast(graph, floor_float(graph, scaled, name .. "/floor",
+    "float32"), "float32", "int32", name .. "/offset")
+  return tf.add(graph, offset, half_op, name, "int32")
+end
+
+-- Apply a cutout mask at independently sampled per-image centers, following
+-- tfa.image.random_cutout.  Images must be rank-4 NHWC.
+function Image.random_cutout(graph, images, mask_size, options)
+  options = options or {}
+  local name = options.name or "random_cutout"
+  local dtype = options.dtype or images.dtype or "float32"
+  if type(mask_size) ~= "table" or #mask_size ~= 2 then
+    error(name .. " requires mask_size = {height, width}", 3)
+  end
+  for _, value in ipairs(mask_size) do
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 2 or
+        value % 2 ~= 0 then
+      error(name .. " mask dimensions must be positive even integers", 3)
+    end
+  end
+  local constant_values = options.constant_values or 0
+  if type(constant_values) ~= "number" or constant_values ~= constant_values
+      or constant_values == math.huge or constant_values == -math.huge then
+    error(name .. " constant_values must be a finite number", 3)
+  end
+  local shape = tf.shape(graph, images, name .. "/image_shape", dtype)
+  local batch = tf.gather(graph, shape,
+    tf.constant(graph, 0, name .. "/batch_dim_index", "int32"), 0,
+    name .. "/batch_size", "int32")
+  local height = tf.gather(graph, shape,
+    tf.constant(graph, 1, name .. "/height_dim_index", "int32"), 0,
+    name .. "/image_height", "int32")
+  local width = tf.gather(graph, shape,
+    tf.constant(graph, 2, name .. "/width_dim_index", "int32"), 0,
+    name .. "/image_width", "int32")
+  local center_y = random_center(graph, height, mask_size[1], batch,
+    name .. "/center_y", options.seed, options.seed2)
+  local center_x = random_center(graph, width, mask_size[2], batch,
+    name .. "/center_x", options.seed, options.seed2)
+  return cutout_mask(graph, images, mask_size, center_y, center_x,
+    constant_values, name, dtype)
+end
+
+Image.RandomCutout = Image.random_cutout
 
 return Image

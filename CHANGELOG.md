@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Sparsemax layer for sparse simplex projections along a selected axis;
+- generic projective `transform` image helper with configurable output shape;
+- `cutout` image mask with explicit per-image centers and fill values;
+- `random_cutout` image mask with seeded per-image centers;
+- `adjust_hue` image color helper;
+- 85 graph-mode tests.
+
 ## 0.17.0
 
 - Snake periodic activation with configurable frequency;
