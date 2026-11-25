@@ -33,6 +33,21 @@ local function binary_counts(graph, predictions, labels, threshold, name)
   return tp, fp, fn, tn
 end
 
+local function class_id_counts(graph, predictions, labels, options, name)
+  local class_id = options.class_id
+  if type(class_id) ~= "number" or class_id % 1 ~= 0 or class_id < 0 then
+    error(name .. " class_id must be a non-negative integer", 4)
+  end
+  local dtype = options.dtype or "float32"
+  local index = tf.constant(graph, class_id, name .. "/class_id", "int32")
+  local prediction_class = tf.gather(graph, predictions, index, -1,
+    name .. "/prediction_class", predictions.dtype or dtype)
+  local label_class = tf.gather(graph, labels, index, -1,
+    name .. "/label_class", labels.dtype or dtype)
+  return binary_counts(graph, prediction_class, label_class,
+    options.threshold or 0.5, name)
+end
+
 local function finite_number(value)
   return type(value) == "number" and value == value and value ~= math.huge and
     value ~= -math.huge
@@ -461,11 +476,16 @@ function Metrics.f1_score(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "f1_score"
   validate_num_classes(options.num_classes, name)
-  if is_multiclass_request(options) then
-    return multiclass_f1(graph, predictions, labels, options, name)
+  local tp, fp, fn
+  if options.class_id ~= nil then
+    tp, fp, fn = class_id_counts(graph, predictions, labels, options, name)
+  else
+    if is_multiclass_request(options) then
+      return multiclass_f1(graph, predictions, labels, options, name)
+    end
+    tp, fp, fn = binary_counts(graph, predictions, labels,
+      options.threshold or 0.5, name)
   end
-  local threshold = options.threshold or 0.5
-  local tp, fp, fn = binary_counts(graph, predictions, labels, threshold, name)
   local numerator = tf.mul(graph, tf.constant(graph, 2, name .. "/two",
     "float32"), tp, name .. "/numerator", "float32")
   local denominator = tf.add(graph, numerator, tf.add(graph, fp, fn,
@@ -480,12 +500,17 @@ function Metrics.precision(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "precision"
   validate_num_classes(options.num_classes, name)
-  if is_multiclass_request(options) then
-    return multiclass_average_score(graph, predictions, labels, options, name,
-      "precision")
+  local tp, fp
+  if options.class_id ~= nil then
+    tp, fp = class_id_counts(graph, predictions, labels, options, name)
+  else
+    if is_multiclass_request(options) then
+      return multiclass_average_score(graph, predictions, labels, options,
+        name, "precision")
+    end
+    tp, fp = binary_counts(graph, predictions, labels,
+      options.threshold or 0.5, name)
   end
-  local tp, fp = binary_counts(graph, predictions, labels,
-    options.threshold or 0.5, name)
   return Ops.clean_div(graph, tp, tf.add(graph, tp, fp,
     name .. "/predicted_positive", "float32"), name, "float32")
 end
@@ -498,12 +523,17 @@ function Metrics.recall(graph, predictions, labels, options)
   options = options or {}
   local name = options.name or "recall"
   validate_num_classes(options.num_classes, name)
-  if is_multiclass_request(options) then
-    return multiclass_average_score(graph, predictions, labels, options, name,
-      "recall")
+  local tp, fn, _
+  if options.class_id ~= nil then
+    tp, _, fn = class_id_counts(graph, predictions, labels, options, name)
+  else
+    if is_multiclass_request(options) then
+      return multiclass_average_score(graph, predictions, labels, options,
+        name, "recall")
+    end
+    tp, _, fn = binary_counts(graph, predictions, labels,
+      options.threshold or 0.5, name)
   end
-  local tp, _, fn = binary_counts(graph, predictions, labels,
-    options.threshold or 0.5, name)
   return Ops.clean_div(graph, tp, tf.add(graph, tp, fn,
     name .. "/actual_positive", "float32"), name, "float32")
 end
@@ -988,6 +1018,46 @@ function Metrics.pearson_correlation(graph, predictions, labels, options)
     name .. "/product", "float32"), name .. "/denominator", "float32")
   return Ops.clean_div(graph, covariance, denominator, name, "float32")
 end
+
+-- Geometric mean of all elements in a tensor, following
+-- tfa.metrics.GeometricMean.
+function Metrics.geometric_mean(graph, values, options)
+  options = options or {}
+  local name = options.name or "geometric_mean"
+  local dtype = options.dtype or values.dtype or "float32"
+  values = tf.cast(graph, values, values.dtype or dtype, dtype,
+    name .. "/values")
+  local logarithms = tf.log(graph, values, name .. "/log", dtype)
+  local total = Ops.sum_all(graph, logarithms, name .. "/total", dtype)
+  local ones = tf.add(graph, tf.mul(graph, values, tf.constant(graph, 0,
+    name .. "/zero", dtype), name .. "/zero_values", dtype),
+    tf.constant(graph, 1, name .. "/one", dtype), name .. "/ones", dtype)
+  local count = Ops.sum_all(graph, ones, name .. "/count", dtype)
+  return tf.exp(graph, tf.div(graph, total, count, name .. "/log_mean", dtype),
+    name, dtype)
+end
+
+Metrics.GeometricMean = Metrics.geometric_mean
+
+-- Harmonic mean of all elements in a tensor, following
+-- tfa.metrics.HarmonicMean.
+function Metrics.harmonic_mean(graph, values, options)
+  options = options or {}
+  local name = options.name or "harmonic_mean"
+  local dtype = options.dtype or values.dtype or "float32"
+  values = tf.cast(graph, values, values.dtype or dtype, dtype,
+    name .. "/values")
+  local reciprocal = tf.div(graph, tf.constant(graph, 1, name .. "/one",
+    dtype), values, name .. "/reciprocal", dtype)
+  local total = Ops.sum_all(graph, reciprocal, name .. "/total", dtype)
+  local ones = tf.add(graph, tf.mul(graph, values, tf.constant(graph, 0,
+    name .. "/zero", dtype), name .. "/zero_values", dtype),
+    tf.constant(graph, 1, name .. "/ones_one", dtype), name .. "/ones", dtype)
+  local count = Ops.sum_all(graph, ones, name .. "/count", dtype)
+  return Ops.clean_div(graph, count, total, name, dtype)
+end
+
+Metrics.HarmonicMean = Metrics.harmonic_mean
 
 -- Macro F1 for dense one-hot predictions/labels.  Class predictions are
 -- compared one-vs-rest and averaged uniformly.

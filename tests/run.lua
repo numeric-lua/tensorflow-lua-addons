@@ -2309,6 +2309,68 @@ test("SGDW applies decoupled weight decay", function()
   session:close()
 end)
 
+test("geometric mean matches the product root", function()
+  local graph = tf.Graph.new()
+  local values = tf.placeholder(graph, "float32", { 5 }, "geometric_input")
+  local metric = tfa.metrics.geometric_mean(graph, values,
+    { name = "geometric_mean" })
+  local value = run(graph, { [values] = { 1, 3, 5, 7, 9 } }, metric)
+  near(value, 3.9362833, 1e-6, "geometric mean")
+  assert_true(tfa.metrics.GeometricMean == tfa.metrics.geometric_mean)
+end)
+
+test("harmonic mean matches the reciprocal mean", function()
+  local graph = tf.Graph.new()
+  local values = tf.placeholder(graph, "float32", { 3 }, "harmonic_input")
+  local metric = tfa.metrics.harmonic_mean(graph, values,
+    { name = "harmonic_mean" })
+  local value = run(graph, { [values] = { 1, 4, 4 } }, metric)
+  near(value, 2, 1e-6, "harmonic mean")
+  assert_true(tfa.metrics.HarmonicMean == tfa.metrics.harmonic_mean)
+end)
+
+test("precision supports class-id selection", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 3, 3 }, "class_prec_labels")
+  local predictions = tf.placeholder(graph, "float32", { 3, 3 },
+    "class_prec_predictions")
+  local metric = tfa.metrics.precision(graph, predictions, labels,
+    { class_id = 1, name = "class_precision" })
+  local value = run(graph, {
+    [labels] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 1, 0 } },
+    [predictions] = { { 0.9, 0.1, 0 }, { 0.2, 0.8, 0 }, { 0.7, 0.2, 0.1 } },
+  }, metric)
+  near(value, 1, 1e-6, "class-id precision")
+end)
+
+test("recall supports class-id selection", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 3, 3 }, "class_rec_labels")
+  local predictions = tf.placeholder(graph, "float32", { 3, 3 },
+    "class_rec_predictions")
+  local metric = tfa.metrics.recall(graph, predictions, labels,
+    { class_id = 1, name = "class_recall" })
+  local value = run(graph, {
+    [labels] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 1, 0 } },
+    [predictions] = { { 0.9, 0.1, 0 }, { 0.2, 0.8, 0 }, { 0.7, 0.2, 0.1 } },
+  }, metric)
+  near(value, 0.5, 1e-6, "class-id recall")
+end)
+
+test("f1_score supports class-id selection", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 3, 3 }, "class_f1_labels")
+  local predictions = tf.placeholder(graph, "float32", { 3, 3 },
+    "class_f1_predictions")
+  local metric = tfa.metrics.f1_score(graph, predictions, labels,
+    { class_id = 1, name = "class_f1" })
+  local value = run(graph, {
+    [labels] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 1, 0 } },
+    [predictions] = { { 0.9, 0.1, 0 }, { 0.2, 0.8, 0 }, { 0.7, 0.2, 0.1 } },
+  }, metric)
+  near(value, 2 / 3, 1e-6, "class-id F1")
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -2506,6 +2568,10 @@ test("new parity options reject invalid values", function()
     { { ref = input } }, { momentum = 0.9 })
   assert_true(not invalid_sgdw,
     "SGDW should reject unsupported momentum")
+  local invalid_class_id = pcall(tfa.metrics.precision, graph, input, input,
+    { class_id = -1 })
+  assert_true(not invalid_class_id,
+    "precision should reject negative class ids")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

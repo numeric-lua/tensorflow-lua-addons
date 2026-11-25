@@ -61,6 +61,10 @@ local precision_at_recall = tfa.metrics.precision_at_recall(graph, predictions,
   labels, 0.8)
 local recall_at_precision = tfa.metrics.recall_at_precision(graph, predictions,
   labels, 0.8)
+local class_precision = tfa.metrics.precision(graph, scores, one_hot_labels,
+  { class_id = 1 })
+local geometric = tfa.metrics.geometric_mean(graph, values)
+local harmonic = tfa.metrics.harmonic_mean(graph, values)
 local npairs = tfa.losses.npairs_loss(graph, class_ids, similarity_matrix)
 local semihard = tfa.losses.triplet_semihard_loss(graph, class_ids, embeddings,
   { margin = 1, distance_metric = "L2" })
@@ -227,6 +231,8 @@ specialized losses remain on the parity roadmap.
 - `specificity_at_sensitivity`
 - `precision_at_recall`
 - `recall_at_precision`
+- `geometric_mean`
+- `harmonic_mean`
 - `multiclass_f1` (legacy macro-F1 helper)
 
 `f1_score(graph, predictions, labels, options)` keeps the binary threshold API
@@ -239,12 +245,18 @@ the count is inferred from one-hot widths or the largest class id. Use
 integer-versus-one-hot inference. `"weighted"` weights each class by its true
 label support, while `"micro"` computes a single global F1 from all classes.
 
+`precision`, `recall`, and `f1_score` also accept `options.class_id` to compute
+the binary metric for one class selected from the last axis. Predictions and
+labels should be rank-2 or higher with matching shapes; scores are compared
+with `options.threshold`.
+
 `precision(graph, predictions, labels, options)` and
 `recall(graph, predictions, labels, options)` share that binary threshold and
 multiclass averaging API. Binary inputs use `options.threshold` (default
 `0.5`); multiclass inputs accept integer class ids or one-hot rows and
 `options.average = "macro"` (default), `"micro"`, or `"weighted"`.
-`tfa.metrics.Precision` and `tfa.metrics.Recall` are aliases.
+`tfa.metrics.Precision` and `tfa.metrics.Recall` are aliases. Both accept
+`options.class_id` for one-vs-rest binary precision/recall.
 
 `cohen_kappa(graph, predictions, labels, options)` also keeps the binary
 threshold API. For multiclass kappa, pass integer class ids or one-hot rows and
@@ -301,6 +313,12 @@ best precision among operating points with recall at least the requested value;
 symmetric metric. Both accept `options.num_thresholds` (default `200`) and
 `options.from_logits`. `tfa.metrics.PrecisionAtRecall` and
 `tfa.metrics.RecallAtPrecision` are aliases.
+
+`geometric_mean(graph, values, options)` and
+`harmonic_mean(graph, values, options)` compute the geometric and harmonic
+means over all tensor elements, following `tfa.metrics.GeometricMean` and
+`tfa.metrics.HarmonicMean`. `tfa.metrics.GeometricMean` and
+`tfa.metrics.HarmonicMean` are aliases.
 
 Classification metrics accept `options.name` for the graph namespace.
 
@@ -581,7 +599,7 @@ scales from `lower_saturation`/`upper_saturation` and
 | --- | --- | --- |
 | Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink`, `snake` | additional activation wrappers |
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
-| Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `multiclass_f1` | class-id variants and further classification metrics |
+| Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |

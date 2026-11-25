@@ -10,7 +10,9 @@
 - adaptive average and max 2D pooling layers;
 - AdamW and SGDW decoupled weight-decay optimizers;
 - `blend` image helper with interpolating and extrapolating factors;
-- 90 graph-mode tests.
+- geometric and harmonic mean metrics;
+- `class_id` selection for precision, recall, and F1 score;
+- 95 graph-mode tests.
 
 ## 0.17.0
 
