@@ -26,11 +26,19 @@ local function filled(shape, value, depth)
 end
 
 local function pack_int32(graph, values, name)
+  local inputs = {}
+  for index, value in ipairs(values) do
+    if type(value) == "number" then
+      inputs[index] = tf.constant(graph, value, name .. "/" .. index, "int32")
+    else
+      inputs[index] = value
+    end
+  end
   local desc = graph:new_operation("Pack", name)
-  desc:add_inputs(values)
+  desc:add_inputs(inputs)
   desc:set_type("T", "int32")
   desc:set_int("axis", 0)
-  desc:set_int("N", #values)
+  desc:set_int("N", #inputs)
   return desc:finish()
 end
 
@@ -1154,5 +1162,289 @@ function Layers.adaptive_max_pooling_1d(graph, input, output_size, options)
 end
 
 Layers.AdaptiveMaxPooling1D = Layers.adaptive_max_pooling_1d
+
+local function pooling_3d(graph, input, output_size, options, reduce,
+    reducer_name)
+  options = options or {}
+  local name = options.name or reducer_name .. "_pooling_3d"
+  local dtype = options.dtype or input.dtype or "float32"
+  local data_format = options.data_format or "channels_last"
+  if data_format ~= "channels_last" and data_format ~= "channels_first" then
+    error(name .. " data_format must be channels_last or channels_first", 3)
+  end
+  local bins = output_size
+  if type(bins) == "number" then bins = { bins, bins, bins } end
+  if type(bins) ~= "table" or #bins ~= 3 then
+    error(name .. " output_size must be an integer or {depth, rows, cols}", 3)
+  end
+  for _, value in ipairs(bins) do
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+      error(name .. " output_size entries must be positive integers", 3)
+    end
+  end
+  local input_shape = options.input_shape or input.shape
+  if type(input_shape) == "table" then
+    if #input_shape ~= 5 then
+      error(name .. " requires rank-5 inputs", 3)
+    end
+    local depth, height, width
+    if data_format == "channels_last" then
+      depth, height, width = input_shape[2], input_shape[3], input_shape[4]
+    else
+      depth, height, width = input_shape[3], input_shape[4], input_shape[5]
+    end
+    if depth % bins[1] ~= 0 or height % bins[2] ~= 0 or
+        width % bins[3] ~= 0 then
+      error(name .. " spatial dimensions must be divisible by output_size", 3)
+    end
+  end
+  local depth_axis = data_format == "channels_last" and 1 or 2
+  local height_axis = data_format == "channels_last" and 2 or 3
+  local width_axis = data_format == "channels_last" and 3 or 4
+  local depth_parts = tf.split(graph, input, bins[1], depth_axis,
+    name .. "/depth_splits", dtype)
+  local depth_stack = tf.stack(graph, depth_parts, depth_axis,
+    name .. "/depth_stack", dtype)
+  local height_parts = tf.split(graph, depth_stack, bins[2], height_axis + 1,
+    name .. "/height_splits", dtype)
+  local height_stack = tf.stack(graph, height_parts, height_axis + 1,
+    name .. "/height_stack", dtype)
+  local width_parts = tf.split(graph, height_stack, bins[3], width_axis + 2,
+    name .. "/width_splits", dtype)
+  local cells = tf.stack(graph, width_parts, width_axis + 2,
+    name .. "/width_stack", dtype)
+  local axes = data_format == "channels_last" and { 2, 4, 6 } or { 3, 5, 7 }
+  return reduce(graph, cells, axes, name .. "/output", dtype, false)
+end
+
+function Layers.adaptive_average_pooling_3d(graph, input, output_size, options)
+  return pooling_3d(graph, input, output_size, options, tf.reduce_mean,
+    "adaptive_average")
+end
+
+Layers.AdaptiveAveragePooling3D = Layers.adaptive_average_pooling_3d
+
+function Layers.adaptive_max_pooling_3d(graph, input, output_size, options)
+  return pooling_3d(graph, input, output_size, options, tf.reduce_max,
+    "adaptive_max")
+end
+
+Layers.AdaptiveMaxPooling3D = Layers.adaptive_max_pooling_3d
+
+local function scalar_dimension(graph, tensor, index, name, dtype)
+  local shape = tf.shape(graph, tensor, name .. "/shape", dtype)
+  return tf.gather(graph, shape,
+    tf.constant(graph, index, name .. "/index", "int32"), 0, name, "int32")
+end
+
+-- NetVLAD aggregation layer, following tfa.layers.NetVLAD.
+function Layers.netvlad(graph, input, num_clusters, options)
+  options = options or {}
+  if type(num_clusters) ~= "number" or num_clusters % 1 ~= 0 or
+      num_clusters < 1 then
+    error("netvlad requires a positive integer cluster count", 3)
+  end
+  local input_shape = options.input_shape or input.shape
+  if type(input_shape) ~= "table" or #input_shape ~= 3 then
+    error("netvlad requires options.input_shape with rank 3", 3)
+  end
+  local frames = input_shape[2]
+  local feature_dim = input_shape[3]
+  if type(frames) ~= "number" or type(feature_dim) ~= "number" or
+      frames < 1 or feature_dim < 1 then
+    error("netvlad requires static time and feature dimensions", 3)
+  end
+  local name = options.name or "netvlad"
+  local dtype = options.dtype or input.dtype or "float32"
+  local bound = 1 / math.sqrt(feature_dim)
+  local kernel = tf.variable(graph,
+    random_array({ feature_dim, num_clusters }, bound), name .. "/kernel",
+    { dtype = dtype })
+  local bias = tf.variable(graph, filled({ num_clusters }, 0),
+    name .. "/bias", { dtype = dtype })
+  local centers = tf.variable(graph,
+    random_array({ 1, feature_dim, num_clusters }, bound),
+    name .. "/cluster_centers", { dtype = dtype })
+  local variables = { kernel, bias, centers }
+  local initializers = { kernel.initializer, bias.initializer,
+    centers.initializer }
+  local flat = tf.reshape(graph, input, { -1, feature_dim },
+    name .. "/flat", dtype)
+  local assignment = tf.nn.softmax(graph, tf.add(graph, tf.matmul(graph, flat,
+    kernel.read, name .. "/assignment_logits", dtype), bias.read,
+    name .. "/assignment_biased", dtype), name .. "/assignment", dtype)
+  assignment = tf.reshape(graph, assignment, { -1, frames, num_clusters },
+    name .. "/assignment_reshaped", dtype)
+  local assignment_transposed = tf.transpose(graph, assignment, { 0, 2, 1 },
+    name .. "/assignment_transposed", dtype)
+  local weighted = tf.batch_matmul(graph, assignment_transposed, input,
+    name .. "/weighted_frames", dtype)
+  local b = tf.transpose(graph, weighted, { 0, 2, 1 },
+    name .. "/weighted_transposed", dtype)
+  local a_sum = tf.reduce_sum(graph, assignment, { 1 },
+    name .. "/assignment_sum", dtype, true)
+  local a = tf.mul(graph, a_sum, centers.read, name .. "/center_sum", dtype)
+  local vlad = tf.sub(graph, b, a, name .. "/vlad", dtype)
+  local squared = tf.square(graph, vlad, name .. "/squared", dtype)
+  local norm = tf.sqrt(graph, tf.reduce_sum(graph, squared, { 1 },
+    name .. "/feature_norm_squared", dtype, true),
+    name .. "/feature_norm", dtype)
+  vlad = tf.div(graph, vlad, Ops.maximum(graph, norm,
+    tf.constant(graph, 1e-12, name .. "/epsilon", dtype),
+    name .. "/safe_norm", dtype), name .. "/feature_normalized", dtype)
+  vlad = tf.reshape(graph, vlad, { -1, feature_dim * num_clusters },
+    name .. "/flattened", dtype)
+  local flat_squared = tf.square(graph, vlad, name .. "/flat_squared", dtype)
+  local flat_norm = tf.sqrt(graph, tf.reduce_sum(graph, flat_squared, { 1 },
+    name .. "/flat_norm_squared", dtype, true), name .. "/flat_norm", dtype)
+  local output = tf.div(graph, vlad, Ops.maximum(graph, flat_norm,
+    tf.constant(graph, 1e-12, name .. "/flat_epsilon", dtype),
+    name .. "/flat_safe_norm", dtype), name, dtype)
+  return {
+    output = output,
+    kernel = kernel,
+    bias = bias,
+    cluster_centers = centers,
+    variables = variables,
+    initializers = initializers,
+  }
+end
+
+Layers.NetVLAD = Layers.netvlad
+
+local function int_range(graph, limit, name)
+  local desc = graph:new_operation("Range", name)
+  desc:add_input(tf.constant(graph, 0, name .. "/start", "int32"))
+  desc:add_input(limit)
+  desc:add_input(tf.constant(graph, 1, name .. "/delta", "int32"))
+  desc:set_type("Tidx", "int32")
+  return desc:finish()
+end
+
+local function floor_div(graph, a, b, name)
+  local desc = graph:new_operation("FloorDiv", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", "int32")
+  return desc:finish()
+end
+
+local function int_mod(graph, a, b, name)
+  local desc = graph:new_operation("FloorMod", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", "int32")
+  return desc:finish()
+end
+
+-- MaxUnpooling2D, following tfa.layers.MaxUnpooling2D.  `mask` is the argmax
+-- output of a matching max-pooling operation.
+function Layers.max_unpooling_2d(graph, updates, mask, options)
+  options = options or {}
+  local name = options.name or "max_unpooling_2d"
+  local dtype = options.dtype or updates.dtype or "float32"
+  local pool_size = options.pool_size or { 2, 2 }
+  local strides = options.strides or { 2, 2 }
+  if type(pool_size) == "number" then pool_size = { pool_size, pool_size } end
+  if type(strides) == "number" then strides = { strides, strides } end
+  for _, pair in ipairs({ pool_size, strides }) do
+    if type(pair) ~= "table" or #pair ~= 2 then
+      error(name .. " pool_size and strides must be pairs", 3)
+    end
+    for _, value in ipairs(pair) do
+      if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+        error(name .. " pool_size and strides must be positive integers", 3)
+      end
+    end
+  end
+  local padding = string.upper(options.padding or "SAME")
+  if padding ~= "SAME" and padding ~= "VALID" then
+    error(name .. " padding must be 'SAME' or 'VALID'", 3)
+  end
+  local batch = scalar_dimension(graph, updates, 0, name .. "/batch", dtype)
+  local height = scalar_dimension(graph, updates, 1, name .. "/height", dtype)
+  local width = scalar_dimension(graph, updates, 2, name .. "/width", dtype)
+  local channels = scalar_dimension(graph, updates, 3, name .. "/channels",
+    dtype)
+  local one_int = tf.constant(graph, 1, name .. "/one_int", "int32")
+  local out_height, out_width
+  if padding == "SAME" then
+    out_height = tf.mul(graph, height, tf.constant(graph, strides[1],
+      name .. "/stride_h", "int32"), name .. "/out_height", "int32")
+    out_width = tf.mul(graph, width, tf.constant(graph, strides[2],
+      name .. "/stride_w", "int32"), name .. "/out_width", "int32")
+  else
+    out_height = tf.add(graph, tf.mul(graph, tf.sub(graph, height, one_int,
+      name .. "/height_minus_one", "int32"), tf.constant(graph, strides[1],
+      name .. "/stride_h", "int32"), name .. "/valid_height", "int32"),
+      tf.constant(graph, pool_size[1], name .. "/pool_h", "int32"),
+      name .. "/out_height", "int32")
+    out_width = tf.add(graph, tf.mul(graph, tf.sub(graph, width, one_int,
+      name .. "/width_minus_one", "int32"), tf.constant(graph, strides[2],
+      name .. "/stride_w", "int32"), name .. "/valid_width", "int32"),
+      tf.constant(graph, pool_size[2], name .. "/pool_w", "int32"),
+      name .. "/out_width", "int32")
+  end
+  local output_shape = pack_int32(graph, { batch, out_height, out_width,
+    channels }, name .. "/output_shape")
+  local mask_int = tf.cast(graph, mask, mask.dtype or "int32", "int32",
+    name .. "/mask_int")
+  local zero = tf.constant(graph, 0, name .. "/zero", "int32")
+  local one_mask = tf.add(graph, tf.mul(graph, mask_int, zero,
+    name .. "/mask_zero", "int32"), one_int, name .. "/one_mask", "int32")
+  local batch_range = int_range(graph, batch, name .. "/batch_range")
+  local batch_shape = pack_int32(graph, { batch, 1, 1, 1 },
+    name .. "/batch_range_shape")
+  batch_range = dynamic_reshape(graph, batch_range, batch_shape,
+    name .. "/batch_range_reshaped", "int32")
+  local batch_indices = tf.mul(graph, one_mask, batch_range,
+    name .. "/batch_indices", "int32")
+  local feature_range = int_range(graph, channels, name .. "/feature_range")
+  local feature_indices = tf.mul(graph, one_mask, feature_range,
+    name .. "/feature_indices", "int32")
+  local area = tf.mul(graph, out_width, channels, name .. "/area", "int32")
+  local y = floor_div(graph, mask_int, area, name .. "/y")
+  local x = int_mod(graph, floor_div(graph, mask_int, channels, name .. "/x_raw"),
+    out_width, name .. "/x")
+  local indices = tf.stack(graph, { batch_indices, y, x, feature_indices }, 3,
+    name .. "/indices_grid", "int32")
+  local updates_size = tf.reshape(graph, updates, { -1 }, name .. "/updates_flat",
+    dtype)
+  local indices_flat = tf.reshape(graph, indices, { -1, 4 },
+    name .. "/indices_flat", "int32")
+  local desc = graph:new_operation("ScatterNd", name .. "/scatter")
+  desc:add_input(indices_flat)
+  desc:add_input(updates_size)
+  desc:add_input(output_shape)
+  desc:set_type("T", dtype)
+  desc:set_type("Tindices", "int32")
+  return desc:finish()
+end
+
+Layers.MaxUnpooling2D = Layers.max_unpooling_2d
+
+-- Snake layer with a trainable scalar frequency, following tfa.layers.Snake.
+function Layers.snake(graph, input, options)
+  options = options or {}
+  local name = options.name or "snake"
+  local dtype = options.dtype or input.dtype or "float32"
+  local initial = options.frequency or 1
+  if type(initial) ~= "number" or initial ~= initial or initial <= 0 or
+      initial == math.huge then
+    error("snake frequency must be a finite positive number", 3)
+  end
+  local Activations = require("tensorflow_addons.activations")
+  local frequency = tf.variable(graph, initial, name .. "/frequency",
+    { dtype = dtype })
+  return {
+    output = Activations.snake(graph, input, frequency.read,
+      name .. "/output", dtype),
+    frequency = frequency,
+    variables = { frequency },
+    initializers = { frequency.initializer },
+  }
+end
+
+Layers.Snake = Layers.snake
 
 return Layers

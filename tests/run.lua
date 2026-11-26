@@ -2546,6 +2546,98 @@ test("adjust_contrast scales around the channel mean", function()
   assert_true(tfa.image.AdjustContrast == tfa.image.adjust_contrast)
 end)
 
+test("adaptive average pooling 3D reduces equal spatial bins", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 2, 1 },
+    "adaptive_avg_3d_input")
+  local output = tfa.layers.adaptive_average_pooling_3d(graph, input,
+    { 1, 1, 1 }, { input_shape = { 1, 2, 2, 2, 1 }, name = "adaptive_avg_3d" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { { 1 }, { 2 } }, { { 3 }, { 4 } } },
+    { { { 5 }, { 6 } }, { { 7 }, { 8 } } },
+  } } }, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "1,1,1,1,1")
+  near(values:totable()[1][1][1][1][1], 4.5, 1e-6,
+    "adaptive average 3D")
+  assert_true(tfa.layers.AdaptiveAveragePooling3D ==
+    tfa.layers.adaptive_average_pooling_3d)
+  session:close()
+end)
+
+test("adaptive max pooling 3D reduces equal spatial bins", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 2, 1 },
+    "adaptive_max_3d_input")
+  local output = tfa.layers.adaptive_max_pooling_3d(graph, input, 1,
+    { input_shape = { 1, 2, 2, 2, 1 }, name = "adaptive_max_3d" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { { 1 }, { 2 } }, { { 3 }, { 4 } } },
+    { { { 5 }, { 6 } }, { { 7 }, { 8 } } },
+  } } }, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "1,1,1,1,1")
+  near(values:totable()[1][1][1][1][1], 8, 1e-6, "adaptive max 3D")
+  assert_true(tfa.layers.AdaptiveMaxPooling3D ==
+    tfa.layers.adaptive_max_pooling_3d)
+  session:close()
+end)
+
+test("NetVLAD aggregates frames into a normalized descriptor", function()
+  local graph = tf.Graph.new()
+  local frames = tf.placeholder(graph, "float32", { 1, 2, 2 }, "netvlad_frames")
+  local layer = tfa.layers.netvlad(graph, frames, 2,
+    { input_shape = { 1, 2, 2 }, name = "netvlad" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(layer.initializers) })
+  local output = session:run({ [frames] = { { { 1, 2 }, { 3, 4 } } } },
+    { layer.output })[1]
+  assert_eq(table.concat(output:shape(), ","), "1,4")
+  local values = output:totable()[1]
+  local square_sum = 0
+  for index = 1, 4 do
+    assert_true(values[index] == values[index], "NetVLAD produced NaN")
+    square_sum = square_sum + values[index] * values[index]
+  end
+  near(math.sqrt(square_sum), 1, 1e-5, "NetVLAD L2 norm")
+  assert_eq(#layer.variables, 3)
+  assert_true(tfa.layers.NetVLAD == tfa.layers.netvlad)
+  session:close()
+end)
+
+test("MaxUnpooling2D scatters pooled values to argmax positions", function()
+  local graph = tf.Graph.new()
+  local updates = tf.placeholder(graph, "float32", { 1, 1, 1, 1 },
+    "unpool_updates")
+  local mask = tf.placeholder(graph, "int32", { 1, 1, 1, 1 }, "unpool_mask")
+  local output = tfa.layers.max_unpooling_2d(graph, updates, mask,
+    { name = "unpool", pool_size = { 2, 2 }, strides = { 2, 2 } })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [updates] = { { { { 4 } } } },
+    [mask] = { { { { 3 } } } } }, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "1,2,2,1")
+  near(values:totable()[1][1][1][1], 0, 0, "unpool top-left")
+  near(values:totable()[1][2][2][1], 4, 0, "unpool bottom-right")
+  assert_true(tfa.layers.MaxUnpooling2D == tfa.layers.max_unpooling_2d)
+  session:close()
+end)
+
+test("Snake layer exposes a trainable frequency", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 3 }, "snake_layer_input")
+  local layer = tfa.layers.snake(graph, input, { name = "snake_layer" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(layer.initializers) })
+  local values = session:run({ [input] = { -1, 0, 1 } }, { layer.output })[1]
+    :totable()
+  near(values[1], -0.29192656, 1e-6, "snake layer negative")
+  near(values[2], 0, 1e-6, "snake layer zero")
+  near(values[3], 1.7080734, 1e-6, "snake layer positive")
+  assert_eq(#layer.variables, 1)
+  assert_true(tfa.layers.Snake == tfa.layers.snake)
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -2778,6 +2870,22 @@ test("new parity options reject invalid values", function()
     math.huge)
   assert_true(not invalid_contrast,
     "adjust_contrast should reject non-finite factors")
+  local invalid_pooling_3d = pcall(tfa.layers.adaptive_average_pooling_3d,
+    graph, input, { 2, 2, 2 }, { input_shape = { 1, 3, 3, 3, 1 } })
+  assert_true(not invalid_pooling_3d,
+    "adaptive 3D pooling should reject non-divisible dimensions")
+  local invalid_netvlad = pcall(tfa.layers.netvlad, graph, input, 2,
+    { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_netvlad,
+    "NetVLAD should require a rank-3 input shape")
+  local invalid_unpool = pcall(tfa.layers.max_unpooling_2d, graph, input,
+    input, { padding = "WRAP" })
+  assert_true(not invalid_unpool,
+    "MaxUnpooling2D should reject unsupported padding")
+  local invalid_snake_layer = pcall(tfa.layers.snake, graph, input,
+    { frequency = 0 })
+  assert_true(not invalid_snake_layer,
+    "Snake layer should reject non-positive frequencies")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

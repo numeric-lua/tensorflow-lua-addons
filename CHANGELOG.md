@@ -20,7 +20,11 @@
 - weighted kappa loss;
 - sparsemax loss from logits;
 - `adjust_gamma` and `adjust_contrast` image helpers;
-- 105 graph-mode tests.
+- adaptive average and max 3D pooling layers;
+- NetVLAD aggregation layer;
+- MaxUnpooling2D layer;
+- trainable-frequency Snake layer wrapper;
+- 110 graph-mode tests.
 
 ## 0.17.0
 

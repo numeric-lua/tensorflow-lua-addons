@@ -86,6 +86,13 @@ local adaptive = tfa.layers.adaptive_average_pooling_2d(graph, image, 4,
   { input_shape = { 1, 8, 8, 16 } })
 local adaptive_1d = tfa.layers.adaptive_average_pooling_1d(graph, sequence, 4,
   { input_shape = { 1, 16, 8 } })
+local adaptive_3d = tfa.layers.adaptive_average_pooling_3d(graph, volume, 2,
+  { input_shape = { 1, 4, 4, 4, 8 } })
+local vlad = tfa.layers.netvlad(graph, frames, 8,
+  { input_shape = { 1, 16, 32 } })
+local unpooled = tfa.layers.max_unpooling_2d(graph, pooled, mask,
+  { pool_size = { 2, 2 }, strides = { 2, 2 } })
+local snake_layer = tfa.layers.snake(graph, input, { frequency = 1 })
 local noisy = tfa.layers.noisy_dense(graph, input, 32,
   { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
@@ -373,6 +380,11 @@ Classification metrics accept `options.name` for the graph namespace.
 - `adaptive_max_pooling_1d`
 - `adaptive_average_pooling_2d`
 - `adaptive_max_pooling_2d`
+- `adaptive_average_pooling_3d`
+- `adaptive_max_pooling_3d`
+- `netvlad`
+- `max_unpooling_2d`
+- `snake`
 - `noisy_dense`
 - `stochastic_depth`
 
@@ -433,6 +445,26 @@ corresponding rank-3 adaptive 1D pooling layers. Input length must be divisible
 by `output_size`; `options.data_format` supports channels-last and
 channels-first. `tfa.layers.AdaptiveAveragePooling1D` and
 `tfa.layers.AdaptiveMaxPooling1D` are aliases.
+
+`adaptive_average_pooling_3d(graph, input, output_size, options)` and
+`adaptive_max_pooling_3d(graph, input, output_size, options)` provide rank-5
+adaptive 3D pooling. Spatial dimensions must be divisible by the requested
+`{depth, rows, cols}` bins. `tfa.layers.AdaptiveAveragePooling3D` and
+`tfa.layers.AdaptiveMaxPooling3D` are aliases.
+
+`netvlad(graph, input, num_clusters, options)` follows `tfa.layers.NetVLAD`,
+aggregating `[batch, time, feature]` frames into a normalized
+`[batch, feature * clusters]` descriptor. It requires `options.input_shape` and
+returns the kernel, bias, and cluster-center variables.
+
+`max_unpooling_2d(graph, updates, mask, options)` follows
+`tfa.layers.MaxUnpooling2D`, scattering pooled values back to their argmax
+positions. It accepts `options.pool_size`, `options.strides`, and
+`options.padding = "SAME" | "VALID"`.
+
+`snake(graph, input, options)` is the trainable-frequency Snake layer wrapper;
+it accepts `options.frequency` as the initial positive frequency and returns the
+frequency variable with the output. `tfa.layers.Snake` is an alias.
 
 `noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
 it learns mean and sigma kernel/bias variables and multiplies the sigma terms
@@ -669,7 +701,7 @@ scales from `lower_saturation`/`upper_saturation` and
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss`, `lifted`, `weighted_kappa`, `sparsemax` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
+| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
 | Image | horizontal/vertical flips, brightness, contrast, saturation/hue, HSV-in-YIQ, gamma, nearest/bilinear/area resize, `sharpness`, `blend`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
