@@ -26,7 +26,10 @@
 - trainable-frequency Snake layer wrapper;
 - RGB/HSV and RGB/grayscale conversion helpers;
 - `dense_image_warp` bilinear flow warping helper;
-- 115 graph-mode tests.
+- translation-to-projective-transform helper;
+- flat-transform/matrix conversion helpers;
+- horizontal and vertical image shear helpers;
+- 120 graph-mode tests.
 
 ## 0.17.0
 

@@ -2719,6 +2719,75 @@ test("dense_image_warp identity flow preserves the image", function()
   assert_true(tfa.image.DenseImageWarp == tfa.image.dense_image_warp)
 end)
 
+test("translations_to_projective_transforms builds offset rows", function()
+  local graph = tf.Graph.new()
+  local output = tfa.image.translations_to_projective_transforms(graph,
+    { 1, 2 }, { name = "translations" })
+  local values = run(graph, {}, output)
+  near(values[1][1], 1, 1e-6, "translation identity a")
+  near(values[1][3], -1, 1e-6, "translation x offset")
+  near(values[1][6], -2, 1e-6, "translation y offset")
+  assert_true(tfa.image.TranslationsToProjectiveTransforms ==
+    tfa.image.translations_to_projective_transforms)
+end)
+
+test("flat_transforms_to_matrices appends the homogeneous coordinate", function()
+  local graph = tf.Graph.new()
+  local output = tfa.image.flat_transforms_to_matrices(graph,
+    { 1, 0, 2, 0, 1, 3, 0, 0 }, { name = "flat_to_matrices" })
+  local session = tf.Session.new(graph)
+  local values = session:run({}, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "1,3,3")
+  near(values:totable()[1][1][1], 1, 1e-6, "matrix a")
+  near(values:totable()[1][1][3], 2, 1e-6, "matrix x offset")
+  near(values:totable()[1][2][3], 3, 1e-6, "matrix y offset")
+  near(values:totable()[1][3][3], 1, 1e-6, "matrix homogeneous")
+  assert_true(tfa.image.FlatTransformsToMatrices ==
+    tfa.image.flat_transforms_to_matrices)
+  session:close()
+end)
+
+test("matrices_to_flat_transforms divides by the homogeneous entry", function()
+  local graph = tf.Graph.new()
+  local output = tfa.image.matrices_to_flat_transforms(graph,
+    { { 1, 0, 2 }, { 0, 1, 3 }, { 0, 0, 1 } },
+    { name = "matrices_to_flat" })
+  local values = run(graph, {}, output)
+  near(values[1][1], 1, 1e-6, "flat identity a")
+  near(values[1][3], 2, 1e-6, "flat x offset")
+  near(values[1][6], 3, 1e-6, "flat y offset")
+  assert_true(tfa.image.MatricesToFlatTransforms ==
+    tfa.image.matrices_to_flat_transforms)
+end)
+
+test("shear_x shifts rows horizontally", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "shear_x_input")
+  local output = tfa.image.shear_x(graph, input, 1, { name = "shear_x" })
+  local values = run(graph, { [input] = { { { { 1 }, { 2 } },
+    { { 3 }, { 4 } } } } }, output)[1]
+  near(values[1][1][1], 1, 1e-6, "shear x first a")
+  near(values[1][2][1], 2, 1e-6, "shear x first b")
+  near(values[2][1][1], 4, 1e-6, "shear x second a")
+  near(values[2][2][1], 0, 1e-6, "shear x fill")
+  assert_true(tfa.image.ShearX == tfa.image.shear_x)
+end)
+
+test("shear_y shifts columns vertically", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "shear_y_input")
+  local output = tfa.image.shear_y(graph, input, 1, { name = "shear_y" })
+  local values = run(graph, { [input] = { { { { 1 }, { 2 } },
+    { { 3 }, { 4 } } } } }, output)[1]
+  near(values[1][1][1], 1, 1e-6, "shear y first a")
+  near(values[1][2][1], 4, 1e-6, "shear y first b")
+  near(values[2][1][1], 3, 1e-6, "shear y second a")
+  near(values[2][2][1], 0, 1e-6, "shear y fill")
+  assert_true(tfa.image.ShearY == tfa.image.shear_y)
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")

@@ -1664,4 +1664,93 @@ end
 
 Image.DenseImageWarp = Image.dense_image_warp
 
+-- Convert translation vectors to flat projective transform rows, following
+-- tfa.image.translations_to_projective_transforms.
+function Image.translations_to_projective_transforms(graph, translations,
+    options)
+  options = options or {}
+  local name = options.name or "translations_to_projective_transforms"
+  if type(translations) ~= "table" or #translations == 0 then
+    error(name .. " requires a translation pair or list of pairs", 3)
+  end
+  local pairs = translations
+  if type(translations[1]) == "number" then pairs = { translations } end
+  local rows = {}
+  for index, pair in ipairs(pairs) do
+    if type(pair) ~= "table" or #pair ~= 2 or
+        type(pair[1]) ~= "number" or type(pair[2]) ~= "number" then
+      error(name .. " translations must be [dx, dy] pairs", 3)
+    end
+    rows[index] = { 1, 0, -pair[1], 0, 1, -pair[2], 0, 0 }
+  end
+  return tf.constant(graph, rows, name, "float32")
+end
+
+Image.TranslationsToProjectiveTransforms =
+  Image.translations_to_projective_transforms
+
+-- Convert flat projective transforms to 3x3 matrices, following
+-- tfa.image.flat_transforms_to_matrices.
+function Image.flat_transforms_to_matrices(graph, transforms, options)
+  options = options or {}
+  local name = options.name or "flat_transforms_to_matrices"
+  local rows = rows_tensor(graph, transforms, name)
+  return flat_to_matrices(graph, rows, name)
+end
+
+Image.FlatTransformsToMatrices = Image.flat_transforms_to_matrices
+
+-- Convert 3x3 projective matrices to flat transforms, following
+-- tfa.image.matrices_to_flat_transforms.
+function Image.matrices_to_flat_transforms(graph, matrices, options)
+  options = options or {}
+  local name = options.name or "matrices_to_flat_transforms"
+  if type(matrices) ~= "table" or #matrices == 0 then
+    error(name .. " requires a matrix or list of matrices", 3)
+  end
+  if type(matrices[1]) == "number" then matrices = { matrices } end
+  local flat = tf.reshape(graph, tf.constant(graph, matrices,
+    name .. "/matrix", "float32"), { -1, 9 }, name .. "/flat", "float32")
+  local linear = tf.slice(graph, flat, { 0, 0 }, { -1, 8 },
+    name .. "/linear", "float32")
+  local scale = tf.slice(graph, flat, { 0, 8 }, { -1, 1 },
+    name .. "/scale", "float32")
+  return tf.div(graph, linear, scale, name, "float32")
+end
+
+Image.MatricesToFlatTransforms = Image.matrices_to_flat_transforms
+
+-- Horizontal shear, following tfa.image.shear_x.  options.replace controls
+-- constant fill and options.interpolation defaults to nearest.
+function Image.shear_x(graph, image, level, options)
+  options = options or {}
+  local name = options.name or "shear_x"
+  if type(level) ~= "number" or level ~= level or level == math.huge or
+      level == -math.huge then
+    error(name .. " level must be a finite number", 3)
+  end
+  return Image.transform(graph, image, { 1, level, 0, 0, 1, 0, 0, 0 },
+    { name = name, interpolation = options.interpolation or "nearest",
+      fill_mode = options.fill_mode or "constant",
+      fill_value = options.replace or 0 })
+end
+
+Image.ShearX = Image.shear_x
+
+-- Vertical shear, following tfa.image.shear_y.
+function Image.shear_y(graph, image, level, options)
+  options = options or {}
+  local name = options.name or "shear_y"
+  if type(level) ~= "number" or level ~= level or level == math.huge or
+      level == -math.huge then
+    error(name .. " level must be a finite number", 3)
+  end
+  return Image.transform(graph, image, { 1, 0, 0, level, 1, 0, 0, 0 },
+    { name = name, interpolation = options.interpolation or "nearest",
+      fill_mode = options.fill_mode or "constant",
+      fill_value = options.replace or 0 })
+end
+
+Image.ShearY = Image.shear_y
+
 return Image

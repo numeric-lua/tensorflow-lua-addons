@@ -125,6 +125,14 @@ local composed = tfa.image.compose_transforms(graph,
   { { 1, 0, 1, 0, 1, 0, 0, 0 }, { 1, 0, 1, 0, 1, 0, 0, 0 } })
 local angle_rows = tfa.image.angles_to_projective_transforms(graph,
   math.pi / 4, 8, 8)
+local translation_rows = tfa.image.translations_to_projective_transforms(
+  graph, { 2, 1 })
+local transform_matrix = tfa.image.flat_transforms_to_matrices(graph,
+  translation_rows)
+local flat_rows = tfa.image.matrices_to_flat_transforms(graph,
+  transform_matrix)
+local sheared_x = tfa.image.shear_x(graph, image, 0.25)
+local sheared_y = tfa.image.shear_y(graph, image, 0.25)
 local cut = tfa.image.cutout(graph, image, { 4, 4 }, { 8, 8 })
 local random_cut = tfa.image.random_cutout(graph, image, { 4, 4 })
 local small = tfa.image.bilinear_resize(graph, image, 4, 4)
@@ -570,6 +578,11 @@ the resolved `sync_period`/`slow_step_size`.
 - `transform`
 - `compose_transforms`
 - `angles_to_projective_transforms`
+- `translations_to_projective_transforms`
+- `flat_transforms_to_matrices`
+- `matrices_to_flat_transforms`
+- `shear_x`
+- `shear_y`
 - `cutout`
 - `random_cutout`
 - `resize_nearest`
@@ -624,6 +637,17 @@ transform vectors or transform-row matrices into one composed transform.
 options)` follows `tfa.image.angles_to_projective_transforms`, converting one
 angle or a list of angles in radians into flat projective transform rows.
 `tfa.image.AnglesToProjectiveTransforms` is an alias.
+
+`translations_to_projective_transforms(graph, translations, options)` converts
+one `{dx, dy}` pair or a list of pairs into flat transform rows.
+`flat_transforms_to_matrices` appends the homogeneous coordinate, and
+`matrices_to_flat_transforms` normalizes by the homogeneous entry. Their
+capitalized aliases are available.
+
+`shear_x(graph, image, level, options)` and `shear_y(graph, image, level,
+options)` apply horizontal or vertical shear through the projective transform
+op, honoring `options.interpolation`, `options.fill_mode`, and
+`options.replace`. `tfa.image.ShearX` and `tfa.image.ShearY` are aliases.
 
 `cutout(graph, images, mask_size, offset, options)` follows `tfa.image.cutout`
 for rank-4 NHWC images. `mask_size` is a positive even `{height, width}` pair;
@@ -722,7 +746,7 @@ scales from `lower_saturation`/`upper_saturation` and
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
-| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, HSV-in-YIQ, gamma, RGB/HSV/grayscale conversion, nearest/bilinear/area resize, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
+| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, HSV-in-YIQ, gamma, RGB/HSV/grayscale conversion, nearest/bilinear/area resize, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translations_to_projective_transforms`, `flat_transforms_to_matrices`, `matrices_to_flat_transforms`, `shear_x`, `shear_y`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 
