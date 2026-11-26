@@ -819,4 +819,209 @@ end
 
 Losses.TripletSemiHardLoss = Losses.triplet_semihard_loss
 
+-- Lifted structured loss, following tfa.losses.lifted_struct_loss.  Labels
+-- are 1-D class ids and embeddings are unnormalized feature vectors.
+function Losses.lifted(graph, labels, embeddings, options)
+  options = options or {}
+  local name = options.name or "lifted_struct_loss"
+  local dtype = options.dtype or embeddings.dtype or "float32"
+  local margin = options.margin
+  if margin == nil then margin = 1 end
+  if type(margin) ~= "number" or margin ~= margin or margin < 0 or
+      margin == math.huge then
+    error("lifted margin must be a finite non-negative number", 4)
+  end
+  embeddings = tf.cast(graph, embeddings, embeddings.dtype or dtype, dtype,
+    name .. "/embeddings")
+  labels = tf.cast(graph, labels, labels.dtype or "int32", "int32",
+    name .. "/labels")
+  local distances = pairwise_distance(graph, embeddings, "L2", name, dtype)
+  local column = tf.reshape(graph, labels, { -1, 1 }, name .. "/column",
+    "int32")
+  local row = tf.reshape(graph, labels, { 1, -1 }, name .. "/row", "int32")
+  local adjacency = Ops.equal(graph, column, row, name .. "/adjacency", "int32")
+  local adjacency_float = tf.cast(graph, adjacency, "bool", dtype,
+    name .. "/adjacency_float")
+  local adjacency_not = tf.cast(graph, Ops.logical_not(graph, adjacency,
+    name .. "/adjacency_not"), "bool", dtype, name .. "/adjacency_not_float")
+  local margin_op = tf.constant(graph, margin, name .. "/margin", dtype)
+  local diff = tf.sub(graph, margin_op, distances, name .. "/margin_difference",
+    dtype)
+  local row_minimums = tf.reduce_min(graph, diff, { 1 },
+    name .. "/row_minimums", dtype, true)
+  local shifted = tf.sub(graph, diff, row_minimums, name .. "/shifted", dtype)
+  local masked = tf.mul(graph, shifted, adjacency_not,
+    name .. "/masked_differences", dtype)
+  local negative_maximums = tf.add(graph, tf.reduce_max(graph, masked, { 1 },
+    name .. "/negative_maximums", dtype, true), row_minimums,
+    name .. "/row_negative_maximums", dtype)
+  local max_elements = tf.maximum(graph, negative_maximums,
+    tf.transpose(graph, negative_maximums, { 1, 0 },
+      name .. "/negative_maximums_transposed", dtype),
+    name .. "/max_elements", dtype)
+  local batch_size = dimension(graph, embeddings, 0, name .. "/batch_size",
+    dtype)
+  local diff_tiled = tile_dynamic(graph, diff, { batch_size, 1 },
+    name .. "/diff_tiled", dtype)
+  local mask_tiled = tile_dynamic(graph, adjacency_not, { batch_size, 1 },
+    name .. "/mask_tiled", dtype)
+  local max_vector = tf.reshape(graph, tf.transpose(graph, max_elements,
+    { 1, 0 }, name .. "/max_elements_transposed", dtype), { -1, 1 },
+    name .. "/max_vector", dtype)
+  local exponentials = tf.exp(graph, tf.sub(graph, diff_tiled, max_vector,
+    name .. "/exponential_differences", dtype),
+    name .. "/exponentials", dtype)
+  local masked_exponentials = tf.mul(graph, exponentials, mask_tiled,
+    name .. "/masked_exponentials", dtype)
+  local summed_exponentials = tf.reduce_sum(graph, masked_exponentials, { 1 },
+    name .. "/summed_exponentials", dtype, true)
+  local loss_exp_left = reshape_dynamic(graph, summed_exponentials,
+    { batch_size, batch_size }, name .. "/loss_exp_left", dtype)
+  local log_terms = tf.add(graph, loss_exp_left,
+    tf.transpose(graph, loss_exp_left, { 1, 0 },
+      name .. "/loss_exp_left_transposed", dtype), name .. "/log_terms", dtype)
+  local loss_matrix = tf.add(graph, max_elements, tf.log(graph, log_terms,
+    name .. "/log_loss_terms", dtype), name .. "/loss_matrix", dtype)
+  loss_matrix = tf.add(graph, loss_matrix, distances,
+    name .. "/loss_matrix_with_distances", dtype)
+  local identity = identity_matrix(graph, batch_size, name .. "/identity",
+    dtype)
+  local positive_mask = tf.sub(graph, adjacency_float, identity,
+    name .. "/positive_mask", dtype)
+  local positive_count = tf.div(graph, Ops.sum_all(graph, positive_mask,
+    name .. "/positive_count_raw", dtype), tf.constant(graph, 2,
+    name .. "/two", dtype), name .. "/positive_count", dtype)
+  local positive_loss = Ops.maximum(graph, tf.mul(graph, loss_matrix,
+    positive_mask, name .. "/positive_loss_values", dtype),
+    tf.constant(graph, 0, name .. "/zero", dtype), name .. "/positive_loss",
+    dtype)
+  local total = Ops.sum_all(graph, tf.square(graph, positive_loss,
+    name .. "/squared_positive_loss", dtype), name .. "/total", dtype)
+  total = tf.mul(graph, tf.constant(graph, 0.25, name .. "/quarter", dtype),
+    total, name .. "/scaled_total", dtype)
+  return Ops.clean_div(graph, total, positive_count, name, dtype, 1e-12)
+end
+
+Losses.LiftedStructLoss = Losses.lifted
+Losses.lifted_struct_loss = Losses.lifted
+
+-- Weighted kappa loss for ordinal multi-class predictions, following
+-- tfa.losses.WeightedKappaLoss.
+function Losses.weighted_kappa(graph, labels, predictions, options)
+  options = options or {}
+  local name = options.name or "cohen_kappa_loss"
+  local dtype = options.dtype or predictions.dtype or "float32"
+  local num_classes = options.num_classes
+  if type(num_classes) ~= "number" or num_classes % 1 ~= 0 or
+      num_classes < 2 then
+    error("weighted_kappa requires num_classes >= 2", 4)
+  end
+  local weightage = options.weightage or options.weights or "quadratic"
+  if weightage ~= "linear" and weightage ~= "quadratic" then
+    error("weighted_kappa weightage must be 'linear' or 'quadratic'", 4)
+  end
+  local epsilon = options.epsilon
+  if epsilon == nil then epsilon = 1e-6 end
+  if type(epsilon) ~= "number" or epsilon ~= epsilon or epsilon <= 0 then
+    error("weighted_kappa epsilon must be a positive number", 4)
+  end
+  labels = tf.cast(graph, labels, labels.dtype or dtype, dtype,
+    name .. "/labels")
+  predictions = tf.cast(graph, predictions, predictions.dtype or dtype, dtype,
+    name .. "/predictions")
+  local weight_values = {}
+  for row = 0, num_classes - 1 do
+    weight_values[row + 1] = {}
+    for column = 0, num_classes - 1 do
+      local difference = math.abs(row - column)
+      if weightage == "quadratic" then difference = difference * difference end
+      weight_values[row + 1][column + 1] = difference
+    end
+  end
+  local weight_matrix = tf.constant(graph, weight_values,
+    name .. "/weight_matrix", dtype)
+  local label_values = {}
+  local row_values = {}
+  for index = 0, num_classes - 1 do
+    label_values[index + 1] = index
+    row_values[index + 1] = { index }
+  end
+  local column_vector = tf.constant(graph, row_values, name .. "/column_vector",
+    dtype)
+  local row_vector = tf.constant(graph, { label_values },
+    name .. "/row_vector", dtype)
+  local category_labels = matmul(graph, labels, column_vector, false, false,
+    name .. "/category_labels", dtype)
+  local batch_size = dimension(graph, labels, 0, name .. "/batch_size", dtype)
+  local category_matrix = tile_dynamic(graph, category_labels, { 1,
+    num_classes }, name .. "/category_matrix", dtype)
+  local row_matrix = tile_dynamic(graph, row_vector, { batch_size, 1 },
+    name .. "/row_matrix", dtype)
+  local differences = tf.abs(graph, tf.sub(graph, category_matrix, row_matrix,
+    name .. "/label_differences", dtype), name .. "/absolute_differences", dtype)
+  if weightage == "quadratic" then
+    differences = tf.square(graph, differences, name .. "/squared_differences",
+      dtype)
+  end
+  local numerator = Ops.sum_all(graph, tf.mul(graph, differences, predictions,
+    name .. "/weighted_predictions", dtype), name .. "/numerator", dtype)
+  local label_distribution = tf.reduce_sum(graph, labels, { 0 },
+    name .. "/label_distribution", dtype, true)
+  local prediction_distribution = tf.reduce_sum(graph, predictions, { 0 },
+    name .. "/prediction_distribution", dtype, true)
+  local weighted_prediction_distribution = matmul(graph, weight_matrix,
+    prediction_distribution, false, true,
+    name .. "/weighted_prediction_distribution", dtype)
+  local denominator = Ops.sum_all(graph, matmul(graph, label_distribution,
+    weighted_prediction_distribution, false, false,
+    name .. "/denominator_tensor", dtype), name .. "/denominator_raw", dtype)
+  denominator = tf.div(graph, denominator, tf.cast(graph, batch_size,
+    "int32", dtype, name .. "/batch_size_float"), name .. "/denominator",
+    dtype)
+  local ratio = Ops.clean_div(graph, numerator, denominator,
+    name .. "/ratio", dtype)
+  return tf.log(graph, tf.add(graph, ratio, tf.constant(graph, epsilon,
+    name .. "/epsilon", dtype), name .. "/epsilon_sum", dtype), name, dtype)
+end
+
+Losses.WeightedKappaLoss = Losses.weighted_kappa
+Losses.weighted_kappa_loss = Losses.weighted_kappa
+
+-- Sparsemax loss computed from logits, following tfa.losses.SparsemaxLoss.
+function Losses.sparsemax(graph, logits, labels, options)
+  options = options or {}
+  local name = options.name or "sparsemax_loss"
+  local dtype = options.dtype or logits.dtype or "float32"
+  local Layers = require("tensorflow_addons.layers")
+  local projected = Layers.sparsemax(graph, logits, { dtype = dtype,
+    input_shape = options.input_shape or logits.shape,
+    name = name .. "/projection" }).output
+  logits = tf.cast(graph, logits, logits.dtype or dtype, dtype,
+    name .. "/logits")
+  labels = tf.cast(graph, labels, labels.dtype or dtype, dtype,
+    name .. "/labels")
+  local zero = tf.constant(graph, 0, name .. "/zero", dtype)
+  local half = tf.constant(graph, 0.5, name .. "/half", dtype)
+  local positive = tf.greater(graph, projected, zero,
+    name .. "/positive_support", dtype)
+  local support_term = tf.mul(graph, projected, tf.sub(graph, logits,
+    tf.mul(graph, half, projected, name .. "/half_sparsemax", dtype),
+    name .. "/support_difference", dtype), name .. "/support_term", dtype)
+  local zeros = tf.mul(graph, projected, zero, name .. "/zeros", dtype)
+  local support_loss = tf.where(graph, positive, support_term, zeros,
+    name .. "/support_loss", dtype)
+  local label_term = tf.mul(graph, labels, tf.sub(graph,
+    tf.mul(graph, half, labels, name .. "/half_labels", dtype), logits,
+    name .. "/label_difference", dtype), name .. "/label_term", dtype)
+  local elementwise = tf.reduce_sum(graph, tf.add(graph, support_loss,
+    label_term, name .. "/elementwise_sum", dtype), { 1 },
+    name .. "/elementwise", dtype, false)
+  return reduce_elementwise(graph, elementwise, options, name, dtype,
+    "sum_over_batch_size")
+end
+
+Losses.SparsemaxLoss = Losses.sparsemax
+Losses.sparsemax_loss = Losses.sparsemax
+Losses.sparsemax_loss_from_logits = Losses.sparsemax
+
 return Losses

@@ -63,6 +63,54 @@ end
 
 Image.AdjustHue = Image.adjust_hue
 
+local function pow_op(graph, input, exponent, name, dtype)
+  local desc = graph:new_operation("Pow", name)
+  desc:add_input(input)
+  desc:add_input(exponent)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+-- Gamma correction, following tf.image.adjust_gamma: gain * input^gamma.
+function Image.adjust_gamma(graph, input, gamma, gain, name)
+  name = name or "adjust_gamma"
+  local dtype = input.dtype or "float32"
+  if type(gamma) ~= "number" or gamma ~= gamma or gamma < 0 or
+      gamma == math.huge then
+    error("adjust_gamma requires a finite non-negative gamma", 3)
+  end
+  if gain == nil then gain = 1 end
+  if type(gain) ~= "number" or gain ~= gain or gain < 0 or
+      gain == math.huge then
+    error("adjust_gamma requires a finite non-negative gain", 3)
+  end
+  local powered = pow_op(graph, input, tf.constant(graph, gamma,
+    name .. "/gamma", dtype), name .. "/power", dtype)
+  return tf.mul(graph, powered, tf.constant(graph, gain, name .. "/gain", dtype),
+    name, dtype)
+end
+
+Image.AdjustGamma = Image.adjust_gamma
+
+-- Contrast adjustment, following tf.image.adjust_contrast.  Each channel is
+-- centered on its spatial mean and scaled by contrast.
+function Image.adjust_contrast(graph, input, contrast, name)
+  name = name or "adjust_contrast"
+  local dtype = input.dtype or "float32"
+  if type(contrast) ~= "number" or contrast ~= contrast or
+      contrast == math.huge or contrast == -math.huge then
+    error("adjust_contrast requires a finite contrast factor", 3)
+  end
+  local desc = graph:new_operation("AdjustContrastv2", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, contrast, name .. "/contrast_factor",
+    "float32"))
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+Image.AdjustContrast = Image.adjust_contrast
+
 local function validate_resize_dimensions(height, width, name)
   for _, value in ipairs({ height, width }) do
     if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then

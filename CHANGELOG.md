@@ -16,7 +16,11 @@
 - `adjust_hsv_in_yiq` color adjustment helper;
 - `compose_transforms` helper for projective transform composition;
 - `angles_to_projective_transforms` helper for rotation matrices;
-- 100 graph-mode tests.
+- lifted structured loss;
+- weighted kappa loss;
+- sparsemax loss from logits;
+- `adjust_gamma` and `adjust_contrast` image helpers;
+- 105 graph-mode tests.
 
 ## 0.17.0
 

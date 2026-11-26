@@ -37,6 +37,10 @@ local hinge = tfa.losses.hinge(graph, signed_labels, predictions,
   { margin = 1 })
 local kl = tfa.losses.kl_divergence(graph, label_distribution,
   predicted_distribution, { reduction = "sum_over_batch_size" })
+local lifted = tfa.losses.lifted(graph, class_ids, embeddings)
+local kappa_loss = tfa.losses.weighted_kappa(graph, one_hot_labels, scores,
+  { num_classes = 4 })
+local sparse_loss = tfa.losses.sparsemax(graph, logits, one_hot_labels)
 local metric = tfa.metrics.f1_score(graph, predictions, labels)
 local precision = tfa.metrics.precision(graph, predicted_classes, labels,
   { average = "macro", num_classes = 3 })
@@ -103,6 +107,8 @@ local recolored = tfa.image.random_hsv_in_yiq(graph, image,
 local muted = tfa.image.adjust_saturation(graph, image, 0.5)
 local hued = tfa.image.adjust_hue(graph, image, 0.25)
 local hsv = tfa.image.adjust_hsv_in_yiq(graph, image, 0.1, 1.1, 0.9)
+local gamma = tfa.image.adjust_gamma(graph, image, 0.8, 1)
+local contrasted = tfa.image.adjust_contrast(graph, image, 1.2)
 local transformed = tfa.image.transform(graph, image,
   { 1, 0, 0, 0, 1, 0, 0, 0 })
 local composed = tfa.image.compose_transforms(graph,
@@ -160,6 +166,9 @@ be a Lua number or a scalar graph tensor.
 - `npairs_loss`
 - `npairs_multilabel_loss`
 - `triplet_semihard_loss`
+- `lifted`
+- `weighted_kappa`
+- `sparsemax`
 
 `giou` accepts boxes shaped `[..., 4]` in `[x1, y1, x2, y2]` order. It pairs
 the leading dimensions one-vs-one and returns the mean `1 - GIoU` loss. Use
@@ -213,11 +222,29 @@ instead, using the count of shared labels as the adjacency matrix.
 (default), `"squared-L2"`, or `"angular"`. `tfa.losses.TripletSemiHardLoss` is
 an alias.
 
+`lifted(graph, labels, embeddings, options)` computes the lifted structured
+loss over in-batch class ids and embedding vectors, following
+`tfa.losses.lifted_struct_loss`; `options.margin` defaults to `1`.
+`tfa.losses.LiftedStructLoss` and `tfa.losses.lifted_struct_loss` are aliases.
+
+`weighted_kappa(graph, labels, predictions, options)` implements
+`tfa.losses.WeightedKappaLoss` for ordinal multi-class predictions. It requires
+`options.num_classes`, accepts `options.weightage = "linear" | "quadratic"`
+(default `"quadratic"`), and uses `options.epsilon` (default `1e-6`).
+`tfa.losses.WeightedKappaLoss` is an alias.
+
+`sparsemax(graph, logits, labels, options)` implements the Sparsemax loss from
+logits, following `tfa.losses.SparsemaxLoss`. Reductions are `"none"`, `"mean"`,
+or `"sum"` (default `"sum_over_batch_size"`). `tfa.losses.SparsemaxLoss`,
+`tfa.losses.sparsemax_loss`, and `tfa.losses.sparsemax_loss_from_logits` are
+aliases.
+
 Loss roadmap: `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`,
 `log_cosh`, `hinge`, `kl_divergence`, `pinball`,
-`sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, and
-`triplet_semihard_loss` are available; hard-triplet mining and further
-specialized losses remain on the parity roadmap.
+`sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`,
+`triplet_semihard_loss`, `lifted`, `weighted_kappa`, and `sparsemax` are
+available; hard-triplet mining and further specialized losses remain on the
+parity roadmap.
 
 ### Metrics
 
@@ -499,6 +526,8 @@ the resolved `sync_period`/`slow_step_size`.
 - `adjust_saturation`
 - `adjust_hue`
 - `adjust_hsv_in_yiq`
+- `adjust_gamma`
+- `adjust_contrast`
 - `transform`
 - `compose_transforms`
 - `angles_to_projective_transforms`
@@ -528,6 +557,11 @@ following `tf.image.adjust_hue`. `tfa.image.AdjustHue` is an alias.
 options)` follows `tfa.image.adjust_hsv_in_yiq`, applying hue rotation in radians
 and saturation/value scaling in YIQ color space.
 `tfa.image.AdjustHSVInYIQ` is an alias.
+
+`adjust_gamma(graph, image, gamma, gain, name)` follows `tf.image.adjust_gamma`
+with `gain * input^gamma`. `adjust_contrast(graph, image, contrast, name)`
+follows `tf.image.adjust_contrast`, scaling each channel around its spatial
+mean. `tfa.image.AdjustGamma` and `tfa.image.AdjustContrast` are aliases.
 
 `transform(graph, image, transforms, options)` follows `tfa.image.transform`.
 Each transform row is `[a0, a1, a2, b0, b1, b2, c0, c1]` and maps output
@@ -632,12 +666,12 @@ scales from `lower_saturation`/`upper_saturation` and
 | Area | Implemented | Remaining TensorFlow Addons work |
 | --- | --- | --- |
 | Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink`, `snake` | additional activation wrappers |
-| Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss` | hard triplet and further specialized losses |
+| Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss`, `lifted`, `weighted_kappa`, `sparsemax` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
-| Image | horizontal/vertical flips, brightness, saturation/hue, HSV-in-YIQ, nearest/bilinear/area resize, `sharpness`, `blend`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
+| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, HSV-in-YIQ, gamma, nearest/bilinear/area resize, `sharpness`, `blend`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

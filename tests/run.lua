@@ -2460,6 +2460,92 @@ test("angles_to_projective_transforms matches the rotation matrix", function()
   session:close()
 end)
 
+test("lifted structured loss matches the reference value", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "int32", { 4 }, "lifted_labels")
+  local embeddings = tf.placeholder(graph, "float32", { 4, 2 },
+    "lifted_embeddings")
+  local loss = tfa.losses.lifted(graph, labels, embeddings,
+    { name = "lifted_loss" })
+  local value = run(graph, {
+    [labels] = { 0, 0, 1, 1 },
+    [embeddings] = { { 1, 0 }, { 1, 1 }, { 0, 1 }, { 0, 2 } },
+  }, loss)
+  near(value, 1.9212109, 1e-6, "lifted structured loss")
+  assert_true(tfa.losses.LiftedStructLoss == tfa.losses.lifted)
+  assert_true(tfa.losses.lifted_struct_loss == tfa.losses.lifted)
+end)
+
+test("weighted kappa loss matches the TFA example", function()
+  local graph = tf.Graph.new()
+  local labels = tf.placeholder(graph, "float32", { 4, 4 }, "kappa_labels")
+  local predictions = tf.placeholder(graph, "float32", { 4, 4 },
+    "kappa_predictions")
+  local loss = tfa.losses.weighted_kappa(graph, labels, predictions,
+    { num_classes = 4, name = "kappa_loss" })
+  local value = run(graph, {
+    [labels] = {
+      { 0, 0, 1, 0 }, { 0, 1, 0, 0 }, { 1, 0, 0, 0 }, { 0, 0, 0, 1 },
+    },
+    [predictions] = {
+      { 0.1, 0.2, 0.6, 0.1 }, { 0.1, 0.5, 0.3, 0.1 },
+      { 0.8, 0.05, 0.05, 0.1 }, { 0.01, 0.09, 0.1, 0.8 },
+    },
+  }, loss)
+  near(value, -1.1611925, 1e-6, "weighted kappa loss")
+  assert_true(tfa.losses.WeightedKappaLoss == tfa.losses.weighted_kappa)
+end)
+
+test("sparsemax loss matches support and non-support cases", function()
+  local graph = tf.Graph.new()
+  local logits = tf.placeholder(graph, "float32", { 2, 3 },
+    "sparsemax_loss_logits")
+  local labels = tf.placeholder(graph, "float32", { 2, 3 },
+    "sparsemax_loss_labels")
+  local loss = tfa.losses.sparsemax(graph, logits, labels,
+    { reduction = "none", name = "sparsemax_loss" })
+  local values = run(graph, {
+    [logits] = { { -1, 0, 1 }, { -5, 1, 2 } },
+    [labels] = { { 0, 0, 1 }, { 1, 0, 0 } },
+  }, loss)
+  near(values[1], 0, 1e-6, "sparsemax support loss")
+  near(values[2], 7, 1e-6, "sparsemax non-support loss")
+  assert_true(tfa.losses.SparsemaxLoss == tfa.losses.sparsemax)
+  assert_true(tfa.losses.sparsemax_loss == tfa.losses.sparsemax)
+end)
+
+test("adjust_gamma applies gain and power correction", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 1 },
+    "gamma_input")
+  local squared = tfa.image.adjust_gamma(graph, input, 2, 1, "gamma_square")
+  local gained = tfa.image.adjust_gamma(graph, input, 0.5, 2, "gamma_gain")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { { { { 0.5 } } } } },
+    { squared, gained })
+  local function scalar(tensor)
+    return tensor:totable()[1][1][1][1]
+  end
+  near(scalar(values[1]), 0.25, 1e-6, "gamma square")
+  near(scalar(values[2]), 2 * math.sqrt(0.5), 1e-6, "gamma gain")
+  assert_true(tfa.image.AdjustGamma == tfa.image.adjust_gamma)
+  session:close()
+end)
+
+test("adjust_contrast scales around the channel mean", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "contrast_input")
+  local output = tfa.image.adjust_contrast(graph, input, 2, "contrast")
+  local values = run(graph, { [input] = { { { { 1 }, { 2 } },
+    { { 3 }, { 4 } } } } }, output)[1]
+  near(values[1][1][1], -0.5, 1e-6, "contrast top-left")
+  near(values[1][2][1], 1.5, 1e-6, "contrast top-right")
+  near(values[2][1][1], 3.5, 1e-6, "contrast bottom-left")
+  near(values[2][2][1], 5.5, 1e-6, "contrast bottom-right")
+  assert_true(tfa.image.AdjustContrast == tfa.image.adjust_contrast)
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -2677,6 +2763,21 @@ test("new parity options reject invalid values", function()
     graph, 0, 0, 2)
   assert_true(not invalid_angles,
     "angles_to_projective_transforms should reject zero dimensions")
+  local invalid_lifted = pcall(tfa.losses.lifted, graph, labels, input,
+    { margin = -1 })
+  assert_true(not invalid_lifted,
+    "lifted should reject negative margins")
+  local invalid_kappa = pcall(tfa.losses.weighted_kappa, graph, predictions,
+    predictions, { num_classes = 4, weightage = "cubic" })
+  assert_true(not invalid_kappa,
+    "weighted_kappa should reject unsupported weightages")
+  local invalid_gamma_value = pcall(tfa.image.adjust_gamma, graph, input, -1)
+  assert_true(not invalid_gamma_value,
+    "adjust_gamma should reject negative gamma")
+  local invalid_contrast = pcall(tfa.image.adjust_contrast, graph, input,
+    math.huge)
+  assert_true(not invalid_contrast,
+    "adjust_contrast should reject non-finite factors")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
