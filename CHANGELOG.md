@@ -24,7 +24,9 @@
 - NetVLAD aggregation layer;
 - MaxUnpooling2D layer;
 - trainable-frequency Snake layer wrapper;
-- 110 graph-mode tests.
+- RGB/HSV and RGB/grayscale conversion helpers;
+- `dense_image_warp` bilinear flow warping helper;
+- 115 graph-mode tests.
 
 ## 0.17.0
 

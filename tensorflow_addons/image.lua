@@ -111,6 +111,54 @@ end
 
 Image.AdjustContrast = Image.adjust_contrast
 
+local function color_convert(graph, op_type, input, name, dtype)
+  local desc = graph:new_operation(op_type, name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  return desc:finish()
+end
+
+-- RGB/HSV and RGB/grayscale conversions.
+function Image.rgb_to_hsv(graph, input, name)
+  name = name or "rgb_to_hsv"
+  return color_convert(graph, "RGBToHSV", input, name,
+    input.dtype or "float32")
+end
+
+Image.RGBToHSV = Image.rgb_to_hsv
+
+function Image.hsv_to_rgb(graph, input, name)
+  name = name or "hsv_to_rgb"
+  return color_convert(graph, "HSVToRGB", input, name,
+    input.dtype or "float32")
+end
+
+Image.HSVToRGB = Image.hsv_to_rgb
+
+function Image.rgb_to_grayscale(graph, input, name)
+  name = name or "rgb_to_grayscale"
+  local dtype = input.dtype or "float32"
+  local channels = tf.split(graph, input, 3, -1, name .. "/channels", dtype)
+  local red = tf.mul(graph, channels[1], tf.constant(graph, 0.2989,
+    name .. "/red_weight", dtype), name .. "/red", dtype)
+  local green = tf.mul(graph, channels[2], tf.constant(graph, 0.587,
+    name .. "/green_weight", dtype), name .. "/green", dtype)
+  local blue = tf.mul(graph, channels[3], tf.constant(graph, 0.114,
+    name .. "/blue_weight", dtype), name .. "/blue", dtype)
+  return tf.add(graph, tf.add(graph, red, green, name .. "/red_green", dtype),
+    blue, name, dtype)
+end
+
+Image.RGBToGrayscale = Image.rgb_to_grayscale
+
+function Image.grayscale_to_rgb(graph, input, name)
+  name = name or "grayscale_to_rgb"
+  local dtype = input.dtype or "float32"
+  return tf.concat(graph, { input, input, input }, -1, name, dtype)
+end
+
+Image.GrayscaleToRGB = Image.grayscale_to_rgb
+
 local function validate_resize_dimensions(height, width, name)
   for _, value in ipairs({ height, width }) do
     if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
@@ -173,11 +221,19 @@ end
 Image.AreaResize = Image.area_resize
 
 local function pack_int32(graph, values, name)
+  local inputs = {}
+  for index, value in ipairs(values) do
+    if type(value) == "number" then
+      inputs[index] = tf.constant(graph, value, name .. "/" .. index, "int32")
+    else
+      inputs[index] = value
+    end
+  end
   local desc = graph:new_operation("Pack", name)
-  desc:add_inputs(values)
+  desc:add_inputs(inputs)
   desc:set_type("T", "int32")
   desc:set_int("axis", 0)
-  desc:set_int("N", #values)
+  desc:set_int("N", #inputs)
   return desc:finish()
 end
 
@@ -1487,5 +1543,125 @@ function Image.angles_to_projective_transforms(graph, angles, image_height,
 end
 
 Image.AnglesToProjectiveTransforms = Image.angles_to_projective_transforms
+
+local function image_dimension(graph, tensor, index, name, dtype)
+  local shape = tf.shape(graph, tensor, name .. "/shape", dtype)
+  return tf.gather(graph, shape,
+    tf.constant(graph, index, name .. "/index", "int32"), 0, name, "int32")
+end
+
+-- Warp an image with a dense per-pixel flow field, following
+-- tfa.image.dense_image_warp.  Flow is [batch, height, width, 2] and uses
+-- (row, column) offsets from output to input coordinates.
+function Image.dense_image_warp(graph, image, flow, options)
+  options = options or {}
+  local name = options.name or "dense_image_warp"
+  local dtype = options.dtype or image.dtype or "float32"
+  local flow_dtype = flow.dtype or dtype
+  local batch = image_dimension(graph, image, 0, name .. "/batch", dtype)
+  local height = image_dimension(graph, image, 1, name .. "/height", dtype)
+  local width = image_dimension(graph, image, 2, name .. "/width", dtype)
+  local channels = image_dimension(graph, image, 3, name .. "/channels", dtype)
+  local img_dtype = image.dtype or dtype
+  local y_range = tf.reshape(graph, range_int32(graph, height,
+    name .. "/y_range"), { -1, 1 }, name .. "/y", "int32")
+  local x_range = tf.reshape(graph, range_int32(graph, width,
+    name .. "/x_range"), { 1, -1 }, name .. "/x", "int32")
+  local zero_int = tf.constant(graph, 0, name .. "/zero_int", "int32")
+  local zeros = tf.mul(graph, y_range, zero_int, name .. "/zeros", "int32")
+  local ones = tf.add(graph, tf.mul(graph, x_range, zero_int,
+    name .. "/x_zeros", "int32"), tf.constant(graph, 1, name .. "/one",
+    "int32"), name .. "/ones", "int32")
+  local grid_y = tf.mul(graph, ones, y_range, name .. "/grid_y", "int32")
+  local grid_x = tf.add(graph, zeros, x_range, name .. "/grid_x", "int32")
+  local grid = tf.stack(graph, { grid_y, grid_x }, 2, name .. "/grid",
+    "int32")
+  grid = tf.expand_dims(graph, grid, 0, name .. "/batched_grid", "int32")
+  grid = tf.cast(graph, grid, "int32", flow_dtype,
+    name .. "/grid_float")
+  local query = tf.sub(graph, grid, tf.cast(graph, flow, flow_dtype,
+    flow_dtype, name .. "/flow_cast"), name .. "/query", flow_dtype)
+  local query_shape = pack_int32(graph, { batch, tf.mul(graph, height, width,
+    name .. "/pixels", "int32"), 2 }, name .. "/query_shape")
+  query = reshape_dynamic(graph, query, query_shape, name .. "/query_flat",
+    flow_dtype)
+  local queries = tf.unstack(graph, query, 2, 2, name .. "/queries",
+    flow_dtype)
+  local query_y, query_x = queries[1], queries[2]
+  local max_y = tf.cast(graph, tf.sub(graph, height,
+    tf.constant(graph, 2, name .. "/two_y", "int32"), name .. "/max_y_raw",
+    "int32"), "int32", flow_dtype, name .. "/max_y")
+  local max_x = tf.cast(graph, tf.sub(graph, width,
+    tf.constant(graph, 2, name .. "/two_x", "int32"), name .. "/max_x_raw",
+    "int32"), "int32", flow_dtype, name .. "/max_x")
+  local zero_float = tf.constant(graph, 0, name .. "/zero_float", flow_dtype)
+  local one_float = tf.constant(graph, 1, name .. "/one_float", flow_dtype)
+  local floor_y = tf.maximum(graph, zero_float, tf.minimum(graph, query_y,
+    max_y, name .. "/clamped_y", flow_dtype), name .. "/floor_y", flow_dtype)
+  floor_y = floor_float(graph, floor_y, name .. "/floor_y_op", flow_dtype)
+  local floor_x = tf.maximum(graph, zero_float, tf.minimum(graph, query_x,
+    max_x, name .. "/clamped_x", flow_dtype), name .. "/floor_x", flow_dtype)
+  floor_x = floor_float(graph, floor_x, name .. "/floor_x_op", flow_dtype)
+  local int_y = tf.cast(graph, floor_y, flow_dtype, "int32", name .. "/int_y")
+  local int_x = tf.cast(graph, floor_x, flow_dtype, "int32", name .. "/int_x")
+  local ceil_y = tf.add(graph, int_y, tf.constant(graph, 1, name .. "/one_y",
+    "int32"), name .. "/ceil_y", "int32")
+  local ceil_x = tf.add(graph, int_x, tf.constant(graph, 1, name .. "/one_x",
+    "int32"), name .. "/ceil_x", "int32")
+  local alpha_y = tf.minimum(graph, tf.maximum(graph, tf.sub(graph, query_y,
+    floor_y, name .. "/alpha_y_raw", flow_dtype), zero_float,
+    name .. "/alpha_y_min", flow_dtype), one_float, name .. "/alpha_y",
+    flow_dtype)
+  local alpha_x = tf.minimum(graph, tf.maximum(graph, tf.sub(graph, query_x,
+    floor_x, name .. "/alpha_x_raw", flow_dtype), zero_float,
+    name .. "/alpha_x_min", flow_dtype), one_float, name .. "/alpha_x",
+    flow_dtype)
+  alpha_y = tf.expand_dims(graph, alpha_y, 2, name .. "/alpha_y_expanded",
+    flow_dtype)
+  alpha_x = tf.expand_dims(graph, alpha_x, 2, name .. "/alpha_x_expanded",
+    flow_dtype)
+  local grid_shape = pack_int32(graph, { tf.mul(graph, batch, tf.mul(graph,
+    height, width, name .. "/pixel_count", "int32"), name .. "/grid_pixels",
+    "int32"), channels }, name .. "/grid_shape")
+  local flat_grid = reshape_dynamic(graph, image, grid_shape,
+    name .. "/flat_grid", img_dtype)
+  local batch_offsets = tf.mul(graph, range_int32(graph, batch,
+    name .. "/batch_range"), tf.mul(graph, height, width,
+    name .. "/image_pixels", "int32"), name .. "/batch_offsets_raw", "int32")
+  batch_offsets = tf.reshape(graph, batch_offsets, { -1, 1 },
+    name .. "/batch_offsets", "int32")
+  local pixels = tf.mul(graph, height, width, name .. "/num_pixels", "int32")
+  local function gather(y, x, label)
+    local linear = tf.add(graph, batch_offsets, tf.add(graph, tf.mul(graph, y,
+      width, name .. "/" .. label .. "_y_offset", "int32"), x,
+      name .. "/" .. label .. "_offset", "int32"),
+      name .. "/" .. label .. "_linear", "int32")
+    local values = tf.gather(graph, flat_grid, linear, 0,
+      name .. "/" .. label, img_dtype)
+    local gathered_shape = pack_int32(graph, { batch, pixels, channels },
+      name .. "/" .. label .. "_shape")
+    return reshape_dynamic(graph, values, gathered_shape,
+      name .. "/" .. label .. "_reshaped", img_dtype)
+  end
+  local top_left = gather(int_y, int_x, "top_left")
+  local top_right = gather(int_y, ceil_x, "top_right")
+  local bottom_left = gather(ceil_y, int_x, "bottom_left")
+  local bottom_right = gather(ceil_y, ceil_x, "bottom_right")
+  local top = tf.add(graph, top_left, tf.mul(graph, alpha_x, tf.sub(graph,
+    top_right, top_left, name .. "/top_difference", img_dtype),
+    name .. "/top_scaled", img_dtype), name .. "/top", img_dtype)
+  local bottom = tf.add(graph, bottom_left, tf.mul(graph, alpha_x,
+    tf.sub(graph, bottom_right, bottom_left, name .. "/bottom_difference",
+      img_dtype), name .. "/bottom_scaled", img_dtype),
+    name .. "/bottom", img_dtype)
+  local interpolated = tf.add(graph, top, tf.mul(graph, alpha_y,
+    tf.sub(graph, bottom, top, name .. "/vertical_difference", img_dtype),
+    name .. "/vertical_scaled", img_dtype), name .. "/interpolated", img_dtype)
+  local output_shape = pack_int32(graph, { batch, height, width, channels },
+    name .. "/output_shape")
+  return reshape_dynamic(graph, interpolated, output_shape, name, img_dtype)
+end
+
+Image.DenseImageWarp = Image.dense_image_warp
 
 return Image

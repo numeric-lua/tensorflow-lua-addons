@@ -116,6 +116,9 @@ local hued = tfa.image.adjust_hue(graph, image, 0.25)
 local hsv = tfa.image.adjust_hsv_in_yiq(graph, image, 0.1, 1.1, 0.9)
 local gamma = tfa.image.adjust_gamma(graph, image, 0.8, 1)
 local contrasted = tfa.image.adjust_contrast(graph, image, 1.2)
+local hsv_image = tfa.image.rgb_to_hsv(graph, image)
+local gray_image = tfa.image.rgb_to_grayscale(graph, image)
+local warped = tfa.image.dense_image_warp(graph, image, flow)
 local transformed = tfa.image.transform(graph, image,
   { 1, 0, 0, 0, 1, 0, 0, 0 })
 local composed = tfa.image.compose_transforms(graph,
@@ -560,6 +563,10 @@ the resolved `sync_period`/`slow_step_size`.
 - `adjust_hsv_in_yiq`
 - `adjust_gamma`
 - `adjust_contrast`
+- `rgb_to_hsv`
+- `hsv_to_rgb`
+- `rgb_to_grayscale`
+- `grayscale_to_rgb`
 - `transform`
 - `compose_transforms`
 - `angles_to_projective_transforms`
@@ -568,6 +575,7 @@ the resolved `sync_period`/`slow_step_size`.
 - `resize_nearest`
 - `bilinear_resize`
 - `area_resize`
+- `dense_image_warp`
 - `sharpness`
 - `blend`
 - `gaussian_filter2d`
@@ -594,6 +602,11 @@ and saturation/value scaling in YIQ color space.
 with `gain * input^gamma`. `adjust_contrast(graph, image, contrast, name)`
 follows `tf.image.adjust_contrast`, scaling each channel around its spatial
 mean. `tfa.image.AdjustGamma` and `tfa.image.AdjustContrast` are aliases.
+
+`rgb_to_hsv` and `hsv_to_rgb` convert rank-3+ RGB/HSV tensors.
+`rgb_to_grayscale` uses the standard 0.2989/0.587/0.114 luminance weights and
+`grayscale_to_rgb` replicates the grayscale channel. Their capitalized aliases
+are provided for consistency.
 
 `transform(graph, image, transforms, options)` follows `tfa.image.transform`.
 Each transform row is `[a0, a1, a2, b0, b1, b2, c0, c1]` and maps output
@@ -635,6 +648,12 @@ using PIL's 3x3 smoothing kernel. `factor = 1` preserves the image, lower
 values blend toward the smoothed interior while retaining the original border,
 and values above 1 extrapolate. It supports rank-3 HWC and rank-4 NHWC images
 (`options.rank` for rank-3 inputs). `tfa.image.Sharpness` is an alias.
+
+`dense_image_warp(graph, image, flow, options)` follows
+`tfa.image.dense_image_warp`, sampling the source image at
+`[row - flow_y, column - flow_x]` with bilinear interpolation and
+nearest-border handling. `flow` has shape `[batch, height, width, 2]`.
+`tfa.image.DenseImageWarp` is an alias.
 
 `blend(graph, image1, image2, factor, name)` follows `tfa.image.blend`:
 factors between 0 and 1 interpolate and round, while factors above 1
@@ -703,7 +722,7 @@ scales from `lower_saturation`/`upper_saturation` and
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
-| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, HSV-in-YIQ, gamma, nearest/bilinear/area resize, `sharpness`, `blend`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | dense warps and further color transforms |
+| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, HSV-in-YIQ, gamma, RGB/HSV/grayscale conversion, nearest/bilinear/area resize, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

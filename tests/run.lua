@@ -2638,6 +2638,87 @@ test("Snake layer exposes a trainable frequency", function()
   session:close()
 end)
 
+test("rgb_to_hsv converts primary colors", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 3, 3 },
+    "rgb_hsv_input")
+  local output = tfa.image.rgb_to_hsv(graph, input, "rgb_hsv")
+  local values = run(graph, { [input] = { {
+    { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
+  } } }, output)[1][1]
+  near(values[1][1], 0, 1e-6, "red hue")
+  near(values[1][2], 1, 1e-6, "red saturation")
+  near(values[1][3], 1, 1e-6, "red value")
+  near(values[2][1], 1 / 3, 1e-6, "green hue")
+  near(values[3][1], 2 / 3, 1e-6, "blue hue")
+  assert_true(tfa.image.RGBToHSV == tfa.image.rgb_to_hsv)
+end)
+
+test("hsv_to_rgb converts primary colors", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 3, 3 },
+    "hsv_rgb_input")
+  local output = tfa.image.hsv_to_rgb(graph, input, "hsv_rgb")
+  local values = run(graph, { [input] = { {
+    { { 0, 1, 1 }, { 1 / 3, 1, 1 }, { 2 / 3, 1, 1 } },
+  } } }, output)[1][1]
+  near(values[1][1], 1, 1e-6, "red channel")
+  near(values[1][2], 0, 1e-6, "red green")
+  near(values[2][2], 1, 1e-6, "green channel")
+  near(values[3][3], 1, 1e-6, "blue channel")
+  assert_true(tfa.image.HSVToRGB == tfa.image.hsv_to_rgb)
+end)
+
+test("rgb_to_grayscale uses luminance weights", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "rgb_gray_input")
+  local output = tfa.image.rgb_to_grayscale(graph, input, "rgb_gray")
+  local values = run(graph, { [input] = { { { { 1, 0, 0 } } } } }, output)[1]
+  assert_eq(#values[1][1], 1)
+  near(values[1][1][1], 0.2989, 1e-6, "red luminance")
+  assert_true(tfa.image.RGBToGrayscale == tfa.image.rgb_to_grayscale)
+end)
+
+test("grayscale_to_rgb replicates the channel", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 1 },
+    "gray_rgb_input")
+  local output = tfa.image.grayscale_to_rgb(graph, input, "gray_rgb")
+  local values = run(graph, { [input] = { { { { 0.4 } } } } }, output)[1]
+  assert_eq(#values[1][1], 3)
+  near(values[1][1][1], 0.4, 1e-6, "gray red")
+  near(values[1][1][2], 0.4, 1e-6, "gray green")
+  near(values[1][1][3], 0.4, 1e-6, "gray blue")
+  assert_true(tfa.image.GrayscaleToRGB == tfa.image.grayscale_to_rgb)
+end)
+
+test("dense_image_warp identity flow preserves the image", function()
+  local graph = tf.Graph.new()
+  local image = tf.placeholder(graph, "float32", { 1, 3, 3, 1 },
+    "warp_image")
+  local flow = tf.placeholder(graph, "float32", { 1, 3, 3, 2 }, "warp_flow")
+  local output = tfa.image.dense_image_warp(graph, image, flow,
+    { name = "dense_warp" })
+  local zero_flow = {
+    { { 0, 0 }, { 0, 0 }, { 0, 0 } },
+    { { 0, 0 }, { 0, 0 }, { 0, 0 } },
+    { { 0, 0 }, { 0, 0 }, { 0, 0 } },
+  }
+  local values = run(graph, {
+    [image] = { {
+      { { 1 }, { 2 }, { 3 } },
+      { { 4 }, { 5 }, { 6 } },
+      { { 7 }, { 8 }, { 9 } },
+    } },
+    [flow] = { zero_flow },
+  }, output)[1]
+  near(values[1][1][1], 1, 1e-6, "warp top-left")
+  near(values[2][2][1], 5, 1e-6, "warp center")
+  near(values[3][3][1], 9, 1e-6, "warp bottom-right")
+  assert_true(tfa.image.DenseImageWarp == tfa.image.dense_image_warp)
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
