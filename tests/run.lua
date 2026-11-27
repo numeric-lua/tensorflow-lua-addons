@@ -2977,6 +2977,105 @@ test("crop_and_resize samples normalized boxes", function()
   session:close()
 end)
 
+test("ESN unrolls a fixed reservoir with scaled recurrent weights", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2, 3, 2 }, "esn_input")
+  local layer = tfa.layers.esn(graph, input, 4,
+    { input_shape = { 2, 3, 2 }, connectivity = 0.5, return_sequences = true,
+      name = "esn" })
+  local final_layer = tfa.layers.esn(graph, input, 4,
+    { input_shape = { 2, 3, 2 }, connectivity = 0.5, return_sequences = false,
+      name = "esn_final" })
+  local initializers = {}
+  for _, set in ipairs({ layer.initializers, final_layer.initializers }) do
+    for _, initializer in ipairs(set) do
+      initializers[#initializers + 1] = initializer
+    end
+  end
+  local session = tf.Session.new(graph)
+  session:run({}, {}, initializers)
+  local values = session:run({ [input] = {
+    { { 1, 2 }, { 3, 4 }, { 5, 6 } },
+    { { 0, 1 }, { 2, 3 }, { 4, 5 } },
+  } }, { layer.output, final_layer.output, layer.recurrent_kernel.read })
+  assert_eq(table.concat(values[1]:shape(), ","), "2,3,4")
+  assert_eq(table.concat(values[2]:shape(), ","), "2,4")
+  local recurrent = values[3]:totable()
+  local norm_squared = 0
+  for row = 1, 4 do
+    for column = 1, 4 do
+      norm_squared = norm_squared + recurrent[row][column] * recurrent[row][column]
+    end
+  end
+  near(math.sqrt(norm_squared), 0.9, 1e-5, "ESN spectral scaling")
+  assert_true(tfa.layers.ESN == tfa.layers.esn)
+  session:close()
+end)
+
+test("pad_to_bounding_box places the image at an offset", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "pad_box_input")
+  local output = tfa.image.pad_to_bounding_box(graph, input, 1, 1, 4, 4,
+    { input_shape = { 1, 2, 2, 1 }, name = "pad_box" })
+  local values = run(graph, { [input] = { { { { 1 }, { 2 } },
+    { { 3 }, { 4 } } } } }, output)[1]
+  assert_eq(#values, 4)
+  near(values[2][2][1], 1, 1e-6, "pad box top-left")
+  near(values[3][3][1], 4, 1e-6, "pad box bottom-right")
+  near(values[1][1][1], 0, 1e-6, "pad box border")
+  assert_true(tfa.image.PadToBoundingBox == tfa.image.pad_to_bounding_box)
+end)
+
+test("crop_to_bounding_box extracts a rectangle", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "crop_box_input")
+  local output = tfa.image.crop_to_bounding_box(graph, input, 1, 1, 2, 2,
+    { input_shape = { 1, 4, 4, 1 }, name = "crop_box" })
+  local values = run(graph, { [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, output)[1]
+  near(values[1][1][1], 6, 1e-6, "crop box top-left")
+  near(values[2][2][1], 11, 1e-6, "crop box bottom-right")
+  assert_true(tfa.image.CropToBoundingBox == tfa.image.crop_to_bounding_box)
+end)
+
+test("resize_with_pad preserves aspect ratio and pads", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "resize_pad_input")
+  local output = tfa.image.resize_with_pad(graph, input, 6, 4,
+    { input_shape = { 1, 2, 2, 1 }, name = "resize_pad" })
+  local values = run(graph, { [input] = { { { { 1 }, { 2 } },
+    { { 3 }, { 4 } } } } }, output)[1]
+  assert_eq(#values, 6)
+  near(values[1][1][1], 0, 1e-6, "resize pad corner")
+  near(values[2][2][1], 1.25, 1e-6, "resize pad top-left")
+  near(values[5][4][1], 4, 1e-6, "resize pad bottom-right")
+  assert_true(tfa.image.ResizeWithPad == tfa.image.resize_with_pad)
+end)
+
+test("central_crop extracts the centered fraction", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "central_crop_input")
+  local output = tfa.image.central_crop(graph, input, 0.5,
+    { input_shape = { 1, 4, 4, 1 }, name = "central_crop" })
+  local values = run(graph, { [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, output)[1]
+  near(values[1][1][1], 6, 1e-6, "central crop top-left")
+  near(values[2][2][1], 11, 1e-6, "central crop bottom-right")
+  assert_true(tfa.image.CentralCrop == tfa.image.central_crop)
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3259,6 +3358,26 @@ test("new parity options reject invalid values", function()
     { { 0, 0, 1, 1 } }, { 0 }, { 2, 2 }, { method = "cubic" })
   assert_true(not invalid_crop_resize,
     "crop_and_resize should reject unsupported methods")
+  local invalid_esn = pcall(tfa.layers.esn, graph, input, 0,
+    { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_esn,
+    "ESN should reject non-positive unit counts")
+  local invalid_pad_box = pcall(tfa.image.pad_to_bounding_box, graph, input,
+    2, 2, 1, 1, { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_pad_box,
+    "pad_to_bounding_box should reject undersized targets")
+  local invalid_crop_box = pcall(tfa.image.crop_to_bounding_box, graph,
+    input, 2, 2, 3, 3, { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_crop_box,
+    "crop_to_bounding_box should reject out-of-range boxes")
+  local invalid_resize_pad = pcall(tfa.image.resize_with_pad, graph, input,
+    0, 2, { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_resize_pad,
+    "resize_with_pad should reject non-positive targets")
+  local invalid_central_crop = pcall(tfa.image.central_crop, graph, input,
+    0, { input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_central_crop,
+    "central_crop should reject fractions outside (0, 1]")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

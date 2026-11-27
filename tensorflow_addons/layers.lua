@@ -1540,4 +1540,116 @@ end
 
 Layers.SpatialPyramidPooling2D = Layers.spatial_pyramid_pooling_2d
 
+-- Echo State Network layer with a fixed reservoir.  The implementation unrolls
+-- the static time dimension and scales the recurrent matrix by its Frobenius
+-- norm, an upper bound on the spectral radius.
+function Layers.esn(graph, input, units, options)
+  options = options or {}
+  if type(units) ~= "number" or units % 1 ~= 0 or units < 1 then
+    error("esn requires a positive integer unit count", 3)
+  end
+  local input_shape = options.input_shape or input.shape
+  if type(input_shape) ~= "table" or #input_shape ~= 3 then
+    error("esn requires options.input_shape with rank 3", 3)
+  end
+  local batch, time, feature_dim = input_shape[1], input_shape[2],
+    input_shape[3]
+  for _, value in ipairs({ batch, time, feature_dim }) do
+    if type(value) ~= "number" or value < 1 then
+      error("esn requires static batch, time, and feature dimensions", 3)
+    end
+  end
+  local name = options.name or "esn"
+  local dtype = options.dtype or input.dtype or "float32"
+  local connectivity = options.connectivity or 0.1
+  local leaky = options.leaky or 1
+  local spectral_radius = options.spectral_radius or 0.9
+  for label, value in pairs({ connectivity = connectivity, leaky = leaky,
+      spectral_radius = spectral_radius }) do
+    if type(value) ~= "number" or value ~= value or value < 0 or value > 1 then
+      error("esn " .. label .. " must be in [0, 1]", 3)
+    end
+  end
+  local activation = options.activation or "tanh"
+  if activation ~= "tanh" and activation ~= "linear" then
+    error("esn activation must be 'tanh' or 'linear'", 3)
+  end
+  local bound = 1 / math.sqrt(feature_dim)
+  local kernel = tf.variable(graph, random_array({ feature_dim, units }, bound),
+    name .. "/kernel", { dtype = dtype })
+  local recurrent_values = random_array({ units, units }, bound)
+  local norm_squared = 0
+  for row = 1, units do
+    for column = 1, units do
+      if math.random() > connectivity then
+        recurrent_values[row][column] = 0
+      end
+      norm_squared = norm_squared +
+        recurrent_values[row][column] * recurrent_values[row][column]
+    end
+  end
+  local norm = math.sqrt(norm_squared)
+  local scale = spectral_radius / math.max(norm, 1e-12)
+  for row = 1, units do
+    for column = 1, units do
+      recurrent_values[row][column] = recurrent_values[row][column] * scale
+    end
+  end
+  local recurrent = tf.variable(graph, recurrent_values,
+    name .. "/recurrent_kernel", { dtype = dtype })
+  local variables = { kernel, recurrent }
+  local initializers = { kernel.initializer, recurrent.initializer }
+  local bias
+  if options.use_bias ~= false then
+    bias = tf.variable(graph, filled({ units }, 0), name .. "/bias",
+      { dtype = dtype })
+    variables[#variables + 1] = bias
+    initializers[#initializers + 1] = bias.initializer
+  end
+  local state = tf.constant(graph, filled({ batch, units }, 0),
+    name .. "/initial_state", dtype)
+  local outputs = {}
+  for step = 1, time do
+    local input_step = tf.slice(graph, input, { 0, step - 1, 0 },
+      { batch, 1, feature_dim }, name .. "/input_" .. step, dtype)
+    input_step = tf.reshape(graph, input_step, { batch, feature_dim },
+      name .. "/input_flat_" .. step, dtype)
+    local candidate = tf.add(graph, tf.matmul(graph, input_step, kernel.read,
+      name .. "/input_projection_" .. step, dtype), tf.matmul(graph, state,
+      recurrent.read, name .. "/state_projection_" .. step, dtype),
+      name .. "/candidate_sum_" .. step, dtype)
+    if bias ~= nil then
+      candidate = tf.add(graph, candidate, bias.read,
+        name .. "/candidate_biased_" .. step, dtype)
+    end
+    if activation == "tanh" then
+      candidate = tf.nn.tanh(graph, candidate, name .. "/candidate_" .. step,
+        dtype)
+    end
+    state = tf.add(graph, tf.mul(graph, candidate,
+      tf.constant(graph, leaky, name .. "/leaky_" .. step, dtype),
+      name .. "/leaky_candidate_" .. step, dtype), tf.mul(graph, state,
+      tf.constant(graph, 1 - leaky, name .. "/retain_" .. step, dtype),
+      name .. "/retained_state_" .. step, dtype), name .. "/state_" .. step,
+      dtype)
+    outputs[step] = state
+  end
+  local output
+  if options.return_sequences == true then
+    output = tf.stack(graph, outputs, 1, name .. "/output", dtype)
+  else
+    output = state
+  end
+  return {
+    output = output,
+    kernel = kernel,
+    recurrent_kernel = recurrent,
+    bias = bias,
+    variables = variables,
+    initializers = initializers,
+  }
+end
+
+Layers.ESN = Layers.esn
+
 return Layers

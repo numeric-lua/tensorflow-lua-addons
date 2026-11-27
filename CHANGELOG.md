@@ -34,7 +34,9 @@
 - GELU and SpatialPyramidPooling2D layers;
 - dependency-free TQDMProgressBar callback;
 - bicubic resize and normalized crop-and-resize image helpers;
-- 130 graph-mode tests.
+- ESN recurrent layer with fixed reservoir;
+- bounding-box pad/crop and centered resize/crop image helpers;
+- 135 graph-mode tests.
 
 ## 0.17.0
 

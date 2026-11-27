@@ -1958,4 +1958,97 @@ end
 
 Image.CropAndResize = Image.crop_and_resize
 
+local function static_image_shape(name, options, input)
+  local shape = options.input_shape or input.shape
+  if type(shape) ~= "table" or #shape ~= 4 then
+    error(name .. " requires options.input_shape with rank 4", 3)
+  end
+  for _, value in ipairs(shape) do
+    if type(value) ~= "number" or value < 1 then
+      error(name .. " requires static positive input dimensions", 3)
+    end
+  end
+  return shape
+end
+
+function Image.pad_to_bounding_box(graph, input, offset_height, offset_width,
+    target_height, target_width, options)
+  options = options or {}
+  local name = options.name or "pad_to_bounding_box"
+  local shape = static_image_shape(name, options, input)
+  local height, width = shape[2], shape[3]
+  if offset_height < 0 or offset_width < 0 or target_height <
+      offset_height + height or target_width < offset_width + width then
+    error(name .. " target box must contain the image at the requested offset",
+      3)
+  end
+  local paddings = {
+    { 0, 0 },
+    { offset_height, target_height - height - offset_height },
+    { offset_width, target_width - width - offset_width },
+    { 0, 0 },
+  }
+  local dtype = options.dtype or input.dtype or "float32"
+  return tf.pad(graph, input, paddings, "CONSTANT", name, dtype)
+end
+
+Image.PadToBoundingBox = Image.pad_to_bounding_box
+
+function Image.crop_to_bounding_box(graph, input, offset_height, offset_width,
+    target_height, target_width, options)
+  options = options or {}
+  local name = options.name or "crop_to_bounding_box"
+  local shape = static_image_shape(name, options, input)
+  if offset_height < 0 or offset_width < 0 or target_height < 1 or
+      target_width < 1 or offset_height + target_height > shape[2] or
+      offset_width + target_width > shape[3] then
+    error(name .. " crop box is outside the input image", 3)
+  end
+  local dtype = options.dtype or input.dtype or "float32"
+  return tf.slice(graph, input, { 0, offset_height, offset_width, 0 },
+    { shape[1], target_height, target_width, shape[4] }, name, dtype)
+end
+
+Image.CropToBoundingBox = Image.crop_to_bounding_box
+
+function Image.resize_with_pad(graph, input, target_height, target_width,
+    options)
+  options = options or {}
+  local name = options.name or "resize_with_pad"
+  local shape = static_image_shape(name, options, input)
+  if target_height < 1 or target_width < 1 then
+    error(name .. " target dimensions must be positive", 3)
+  end
+  local scale = math.min(target_height / shape[2], target_width / shape[3])
+  local new_height = math.max(1, math.floor(shape[2] * scale))
+  local new_width = math.max(1, math.floor(shape[3] * scale))
+  local resized = Image.bilinear_resize(graph, input, new_height, new_width,
+    name .. "/resize", { dtype = options.dtype })
+  local offset_height = math.floor((target_height - new_height) / 2)
+  local offset_width = math.floor((target_width - new_width) / 2)
+  return Image.pad_to_bounding_box(graph, resized, offset_height, offset_width,
+    target_height, target_width, { name = name, dtype = options.dtype,
+      input_shape = { shape[1], new_height, new_width, shape[4] } })
+end
+
+Image.ResizeWithPad = Image.resize_with_pad
+
+function Image.central_crop(graph, input, fraction, options)
+  options = options or {}
+  local name = options.name or "central_crop"
+  local shape = static_image_shape(name, options, input)
+  if type(fraction) ~= "number" or fraction ~= fraction or fraction <= 0 or
+      fraction > 1 then
+    error(name .. " fraction must be in (0, 1]", 3)
+  end
+  local target_height = math.max(1, math.floor(shape[2] * fraction))
+  local target_width = math.max(1, math.floor(shape[3] * fraction))
+  local offset_height = math.floor((shape[2] - target_height) / 2)
+  local offset_width = math.floor((shape[3] - target_width) / 2)
+  return Image.crop_to_bounding_box(graph, input, offset_height, offset_width,
+    target_height, target_width, { name = name, input_shape = shape })
+end
+
+Image.CentralCrop = Image.central_crop
+
 return Image
