@@ -1447,4 +1447,97 @@ end
 
 Layers.Snake = Layers.snake
 
+-- GELU activation layer using the tanh approximation.
+function Layers.gelu(graph, input, options)
+  options = options or {}
+  local Activations = require("tensorflow_addons.activations")
+  local name = options.name or "gelu"
+  return Activations.gelu(graph, input, name,
+    options.dtype or input.dtype or "float32")
+end
+
+Layers.GELU = Layers.gelu
+
+local function slice_4d(graph, input, begin_values, size_values, name, dtype)
+  local desc = graph:new_operation("Slice", name)
+  desc:add_input(input)
+  desc:add_input(pack_int32(graph, begin_values, name .. "/begin"))
+  desc:add_input(pack_int32(graph, size_values, name .. "/size"))
+  desc:set_type("T", dtype)
+  desc:set_type("Index", "int32")
+  return desc:finish()
+end
+
+local function spatial_bin(graph, input, bin, data_format, name, dtype)
+  local shape = tf.shape(graph, input, name .. "/shape", dtype)
+  local function dim(index, label)
+    return tf.gather(graph, shape,
+      tf.constant(graph, index, name .. "/" .. label .. "_index", "int32"), 0,
+      name .. "/" .. label, "int32")
+  end
+  local batch = dim(0, "batch")
+  local channels = dim(data_format == "channels_last" and 3 or 1, "channels")
+  local height = dim(data_format == "channels_last" and 1 or 2, "height")
+  local width = dim(data_format == "channels_last" and 2 or 3, "width")
+  local overflow_h = int_mod(graph, height, tf.constant(graph, bin[1],
+    name .. "/bin_h", "int32"), name .. "/overflow_h")
+  local overflow_w = int_mod(graph, width, tf.constant(graph, bin[2],
+    name .. "/bin_w", "int32"), name .. "/overflow_w")
+  local new_h = tf.sub(graph, height, overflow_h, name .. "/new_h", "int32")
+  local new_w = tf.sub(graph, width, overflow_w, name .. "/new_w", "int32")
+  local cropped
+  if data_format == "channels_last" then
+    cropped = slice_4d(graph, input, { 0, 0, 0, 0 },
+      { batch, new_h, new_w, channels }, name .. "/crop", dtype)
+  else
+    cropped = slice_4d(graph, input, { 0, 0, 0, 0 },
+      { batch, channels, new_h, new_w }, name .. "/crop", dtype)
+  end
+  local pooled = Layers.adaptive_average_pooling_2d(graph, cropped, bin,
+    { data_format = data_format, name = name .. "/pool" })
+  local product = bin[1] * bin[2]
+  local target = pack_int32(graph, data_format == "channels_last" and
+    { batch, product, channels } or { batch, channels, product },
+    name .. "/target")
+  return dynamic_reshape(graph, pooled, target, name .. "/bin", dtype)
+end
+
+-- Spatial pyramid pooling over adaptive average bins, following
+-- tfa.layers.SpatialPyramidPooling2D.
+function Layers.spatial_pyramid_pooling_2d(graph, input, bins, options)
+  options = options or {}
+  local name = options.name or "spatial_pyramid_pooling_2d"
+  local dtype = options.dtype or input.dtype or "float32"
+  local data_format = options.data_format or "channels_last"
+  if data_format ~= "channels_last" and data_format ~= "channels_first" then
+    error(name .. " data_format must be channels_last or channels_first", 3)
+  end
+  if type(bins) ~= "table" or #bins == 0 then
+    error(name .. " requires a non-empty bins list", 3)
+  end
+  local normalized = {}
+  for index, value in ipairs(bins) do
+    local pair = value
+    if type(value) == "number" then pair = { value, value } end
+    if type(pair) ~= "table" or #pair ~= 2 then
+      error(name .. " bins must be integers or {rows, cols} pairs", 3)
+    end
+    for _, entry in ipairs(pair) do
+      if type(entry) ~= "number" or entry % 1 ~= 0 or entry < 1 then
+        error(name .. " bin entries must be positive integers", 3)
+      end
+    end
+    normalized[index] = pair
+  end
+  local outputs = {}
+  for index, pair in ipairs(normalized) do
+    outputs[index] = spatial_bin(graph, input, pair, data_format,
+      name .. "/bin_" .. index, dtype)
+  end
+  return tf.concat(graph, outputs,
+    data_format == "channels_last" and 1 or 2, name, dtype)
+end
+
+Layers.SpatialPyramidPooling2D = Layers.spatial_pyramid_pooling_2d
+
 return Layers

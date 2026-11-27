@@ -1907,4 +1907,55 @@ end
 
 Image.RandomCrop = Image.random_crop
 
+function Image.resize_bicubic(graph, input, height, width, name, options)
+  options = options or {}
+  name = name or "resize_bicubic"
+  local dtype = options.dtype or input.dtype or "float32"
+  validate_resize_dimensions(height, width, name)
+  local desc = graph:new_operation("ResizeBicubic", name)
+  desc:add_input(input)
+  desc:add_input(tf.constant(graph, { height, width }, name .. "/size",
+    "int32"))
+  desc:set_type("T", dtype)
+  desc:set_bool("align_corners", options.align_corners == true)
+  desc:set_bool("half_pixel_centers", options.half_pixel_centers ~= false)
+  return desc:finish()
+end
+
+Image.ResizeBicubic = Image.resize_bicubic
+
+function Image.crop_and_resize(graph, image, boxes, box_ind, crop_size, options)
+  options = options or {}
+  local name = options.name or "crop_and_resize"
+  local dtype = options.dtype or image.dtype or "float32"
+  if type(crop_size) ~= "table" or #crop_size ~= 2 then
+    error(name .. " requires crop_size = {height, width}", 3)
+  end
+  for _, value in ipairs(crop_size) do
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+      error(name .. " crop dimensions must be positive integers", 3)
+    end
+  end
+  local boxes_op = type(boxes) == "table" and
+    tf.constant(graph, boxes, name .. "/boxes", "float32") or boxes
+  local indices_op = type(box_ind) == "table" and
+    tf.constant(graph, box_ind, name .. "/box_ind", "int32") or box_ind
+  local method = string.lower(options.method or "bilinear")
+  if method ~= "bilinear" and method ~= "nearest" then
+    error(name .. " method must be 'bilinear' or 'nearest'", 3)
+  end
+  local desc = graph:new_operation("CropAndResize", name)
+  desc:add_input(image)
+  desc:add_input(boxes_op)
+  desc:add_input(indices_op)
+  desc:add_input(tf.constant(graph, crop_size, name .. "/crop_size",
+    "int32"))
+  desc:set_type("T", dtype)
+  desc:set_float("extrapolation_value", options.extrapolation_value or 0)
+  desc:set_string("method", method)
+  return desc:finish()
+end
+
+Image.CropAndResize = Image.crop_and_resize
+
 return Image

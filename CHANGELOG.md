@@ -31,7 +31,10 @@
 - horizontal and vertical image shear helpers;
 - random brightness, contrast, saturation, and hue augmentation helpers;
 - random image crop helper;
-- 125 graph-mode tests.
+- GELU and SpatialPyramidPooling2D layers;
+- dependency-free TQDMProgressBar callback;
+- bicubic resize and normalized crop-and-resize image helpers;
+- 130 graph-mode tests.
 
 ## 0.17.0
 

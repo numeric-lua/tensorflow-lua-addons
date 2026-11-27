@@ -93,6 +93,9 @@ local vlad = tfa.layers.netvlad(graph, frames, 8,
 local unpooled = tfa.layers.max_unpooling_2d(graph, pooled, mask,
   { pool_size = { 2, 2 }, strides = { 2, 2 } })
 local snake_layer = tfa.layers.snake(graph, input, { frequency = 1 })
+local gelu_layer = tfa.layers.gelu(graph, input, { name = "gelu_layer" })
+local pyramid = tfa.layers.spatial_pyramid_pooling_2d(graph, image, { 1, 2, 3 },
+  { input_shape = { 1, 8, 8, 16 } })
 local noisy = tfa.layers.noisy_dense(graph, input, 32,
   { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
@@ -142,6 +145,9 @@ local cut = tfa.image.cutout(graph, image, { 4, 4 }, { 8, 8 })
 local random_cut = tfa.image.random_cutout(graph, image, { 4, 4 })
 local small = tfa.image.bilinear_resize(graph, image, 4, 4)
 local pooled = tfa.image.area_resize(graph, image, 4, 4)
+local bicubic = tfa.image.resize_bicubic(graph, image, 4, 4)
+local crops = tfa.image.crop_and_resize(graph, image, { { 0, 0, 1, 1 } }, { 0 },
+  { 4, 4 })
 local sharpened = tfa.image.sharpness(graph, image, 0.5)
 local mixed = tfa.image.blend(graph, image, other_image, 0.5)
 local conditional = tfa.optimizers.ConditionalGradient(graph, loss, { weight },
@@ -158,6 +164,7 @@ local lazy = tfa.optimizers.LazyAdam(graph, loss, { weight },
   { learning_rate = 0.001 })
 local optimizer = tfa.optimizers.Lookahead(tfa.optimizers.LAMB,
   { sync_period = 5, slow_step_size = 0.5, learning_rate = 0.001 })
+local progress = tfa.callbacks.TQDMProgressBar()
 ```
 
 ### Activations
@@ -401,6 +408,8 @@ Classification metrics accept `options.name` for the graph namespace.
 - `netvlad`
 - `max_unpooling_2d`
 - `snake`
+- `gelu`
+- `spatial_pyramid_pooling_2d`
 - `noisy_dense`
 - `stochastic_depth`
 
@@ -481,6 +490,15 @@ positions. It accepts `options.pool_size`, `options.strides`, and
 `snake(graph, input, options)` is the trainable-frequency Snake layer wrapper;
 it accepts `options.frequency` as the initial positive frequency and returns the
 frequency variable with the output. `tfa.layers.Snake` is an alias.
+
+`gelu(graph, input, options)` exposes the tanh-approximation GELU activation as
+a layer. `tfa.layers.GELU` is an alias.
+
+`spatial_pyramid_pooling_2d(graph, input, bins, options)` follows
+`tfa.layers.SpatialPyramidPooling2D`, cropping each bin to divisible spatial
+dimensions, applying adaptive average pooling, flattening the bins, and
+concatenating them along the bin axis. It supports channels-last and
+channels-first inputs. `tfa.layers.SpatialPyramidPooling2D` is an alias.
 
 `noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
 it learns mean and sigma kernel/bias variables and multiplies the sigma terms
@@ -598,6 +616,8 @@ the resolved `sync_period`/`slow_step_size`.
 - `resize_nearest`
 - `bilinear_resize`
 - `area_resize`
+- `resize_bicubic`
+- `crop_and_resize`
 - `dense_image_warp`
 - `sharpness`
 - `blend`
@@ -694,6 +714,11 @@ and values above 1 extrapolate. It supports rank-3 HWC and rank-4 NHWC images
 nearest-border handling. `flow` has shape `[batch, height, width, 2]`.
 `tfa.image.DenseImageWarp` is an alias.
 
+`resize_bicubic(graph, image, height, width, name, options)` resizes rank-4
+images with bicubic interpolation. `crop_and_resize(graph, image, boxes,
+box_ind, crop_size, options)` samples normalized boxes with bilinear or nearest
+interpolation. Their capitalized aliases are available.
+
 `blend(graph, image1, image2, factor, name)` follows `tfa.image.blend`:
 factors between 0 and 1 interpolate and round, while factors above 1
 extrapolate and clip to `0..255`. `tfa.image.Blend` is an alias.
@@ -750,6 +775,11 @@ scales from `lower_saturation`/`upper_saturation` and
 - `TerminateOnNaN`
 - `BackupAndRestore`
 - `CSVLogger`
+- `TQDMProgressBar` (plain Lua progress output)
+
+`TQDMProgressBar(options)` provides a dependency-free progress callback with
+train/epoch lifecycle hooks, metric formatting, and optional progress output.
+It never imports Python or an external tqdm package.
 
 ## Parity status
 
@@ -759,10 +789,10 @@ scales from `lower_saturation`/`upper_saturation` and
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss`, `lifted`, `weighted_kappa`, `sparsemax` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
+| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `gelu`, `spatial_pyramid_pooling_2d`, `noisy_dense`, `stochastic_depth` | ESN and multi-head attention |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
-| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, random color/crop augmentation, HSV-in-YIQ, gamma, RGB/HSV/grayscale conversion, nearest/bilinear/area resize, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translations_to_projective_transforms`, `flat_transforms_to_matrices`, `matrices_to_flat_transforms`, `shear_x`, `shear_y`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
-| Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger` | `TQDMProgressBar` |
+| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, random color/crop augmentation, HSV-in-YIQ, gamma, RGB/HSV/grayscale conversion, nearest/bilinear/bicubic/area resize, `crop_and_resize`, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translations_to_projective_transforms`, `flat_transforms_to_matrices`, `matrices_to_flat_transforms`, `shear_x`, `shear_y`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
+| Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger`, `TQDMProgressBar` | further progress reporting |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 
 ## Tests

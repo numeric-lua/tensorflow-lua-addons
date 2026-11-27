@@ -2878,6 +2878,105 @@ test("random_crop returns a valid crop", function()
   session:close()
 end)
 
+test("GELU layer matches the activation function", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 3 }, "gelu_layer_input")
+  local output = tfa.layers.gelu(graph, input, { name = "gelu_layer" })
+  local expected = tfa.activations.gelu(graph, input, "gelu_reference")
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { -1, 0, 1 } },
+    { output, expected })
+  for index = 1, 3 do
+    near(values[1]:totable()[index], values[2]:totable()[index], 1e-6,
+      "GELU layer value " .. index)
+  end
+  near(values[1]:totable()[2], 0, 1e-6, "GELU zero")
+  assert_true(tfa.layers.GELU == tfa.layers.gelu)
+  session:close()
+end)
+
+test("spatial pyramid pooling concatenates adaptive bins", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "spp_input")
+  local output = tfa.layers.spatial_pyramid_pooling_2d(graph, input, { 1, 2 },
+    { name = "spp" })
+  local values = run(graph, { [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, output)[1]
+  assert_eq(#values, 5)
+  near(values[1][1], 8.5, 1e-6, "SPP global average")
+  near(values[2][1], 3.5, 1e-6, "SPP first 2x2 bin")
+  near(values[5][1], 13.5, 1e-6, "SPP last 2x2 bin")
+  assert_true(tfa.layers.SpatialPyramidPooling2D ==
+    tfa.layers.spatial_pyramid_pooling_2d)
+end)
+
+test("TQDMProgressBar tracks epochs without external dependencies", function()
+  local graph = tf.Graph.new()
+  local value = tf.constant(graph, 1, "tqdm_value", "float32")
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { value })
+  local callback = tfa.callbacks.TQDMProgressBar(
+    { show_epoch_progress = false, show_overall_progress = false })
+  callback.on_train_begin({ epochs = 2, steps = 3 })
+  callback.on_epoch_begin(0)
+  callback.on_batch_end(0, { loss = 1 })
+  callback.on_batch_end(1, { loss = 0.5 })
+  callback.on_epoch_end(0, { loss = 0.5 })
+  callback.on_epoch_begin(1)
+  callback.on_batch_end(0, { loss = 0.25 })
+  callback.on_epoch_end(1, { loss = 0.25 })
+  callback.on_train_end()
+  assert_eq(callback.steps_so_far, 1)
+  assert_eq(callback.last_message, "1/3 - loss: 0.2500")
+  assert_eq(callback.current_epoch, 1)
+  session:close()
+end)
+
+test("resize_bicubic resizes rank-4 images", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "bicubic_input")
+  local output = tfa.image.resize_bicubic(graph, input, 2, 2,
+    "bicubic", { half_pixel_centers = false })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "1,2,2,1")
+  near(values:totable()[1][1][1][1], 1, 1e-6, "bicubic top-left")
+  near(values:totable()[1][2][2][1], 11, 1e-6, "bicubic bottom-right")
+  assert_true(tfa.image.ResizeBicubic == tfa.image.resize_bicubic)
+  session:close()
+end)
+
+test("crop_and_resize samples normalized boxes", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 4, 4, 1 },
+    "crop_resize_input")
+  local output = tfa.image.crop_and_resize(graph, input,
+    { { 0, 0, 1, 1 } }, { 0 }, { 2, 2 }, { name = "crop_resize" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { 1 }, { 2 }, { 3 }, { 4 } },
+    { { 5 }, { 6 }, { 7 }, { 8 } },
+    { { 9 }, { 10 }, { 11 }, { 12 } },
+    { { 13 }, { 14 }, { 15 }, { 16 } },
+  } } }, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "1,2,2,1")
+  near(values:totable()[1][1][1][1], 1, 1e-6, "crop resize top-left")
+  near(values:totable()[1][2][2][1], 16, 1e-6, "crop resize bottom-right")
+  assert_true(tfa.image.CropAndResize == tfa.image.crop_and_resize)
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3145,6 +3244,21 @@ test("new parity options reject invalid values", function()
     2 })
   assert_true(not invalid_random_crop,
     "random_crop should reject non-positive sizes")
+  local invalid_spp = pcall(tfa.layers.spatial_pyramid_pooling_2d, graph,
+    input, {})
+  assert_true(not invalid_spp,
+    "spatial pyramid pooling should reject empty bins")
+  local invalid_tqdm = pcall(tfa.callbacks.TQDMProgressBar,
+    { update_per_second = 0 })
+  assert_true(not invalid_tqdm,
+    "TQDMProgressBar should reject non-positive update rates")
+  local invalid_bicubic = pcall(tfa.image.resize_bicubic, graph, input, 0, 2)
+  assert_true(not invalid_bicubic,
+    "resize_bicubic should reject non-positive sizes")
+  local invalid_crop_resize = pcall(tfa.image.crop_and_resize, graph, input,
+    { { 0, 0, 1, 1 } }, { 0 }, { 2, 2 }, { method = "cubic" })
+  assert_true(not invalid_crop_resize,
+    "crop_and_resize should reject unsupported methods")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
