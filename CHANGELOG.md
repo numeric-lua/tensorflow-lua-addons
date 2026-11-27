@@ -36,7 +36,9 @@
 - bicubic resize and normalized crop-and-resize image helpers;
 - ESN recurrent layer with fixed reservoir;
 - bounding-box pad/crop and centered resize/crop image helpers;
-- 135 graph-mode tests.
+- multi-head scaled dot-product attention layer;
+- RMS, unit, standardization, and local-response normalization layers;
+- 140 graph-mode tests.
 
 ## 0.17.0
 

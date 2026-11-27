@@ -98,6 +98,10 @@ local pyramid = tfa.layers.spatial_pyramid_pooling_2d(graph, image, { 1, 2, 3 },
   { input_shape = { 1, 8, 8, 16 } })
 local reservoir = tfa.layers.esn(graph, sequence, 32,
   { input_shape = { 1, 16, 8 }, return_sequences = true })
+local attention = tfa.layers.multi_head_attention(graph, sequence, sequence,
+  sequence, { query_shape = { 1, 16, 8 }, num_heads = 4, key_dim = 8 })
+local rms = tfa.layers.rms_normalization(graph, input)
+local standardized = tfa.layers.standardize(graph, input)
 local noisy = tfa.layers.noisy_dense(graph, input, 32,
   { input_shape = { 8, 16 } })
 local depth = tfa.layers.stochastic_depth(graph, shortcut, residual,
@@ -404,6 +408,10 @@ Classification metrics accept `options.name` for the graph namespace.
 - `weight_normalization`
 - `spectral_normalization`
 - `filter_response_normalization`
+- `rms_normalization`
+- `unit_normalization`
+- `standardize`
+- `local_response_normalization`
 - `maxout`
 - `poincare_normalize`
 - `tlu`
@@ -421,6 +429,7 @@ Classification metrics accept `options.name` for the graph namespace.
 - `gelu`
 - `spatial_pyramid_pooling_2d`
 - `esn`
+- `multi_head_attention`
 - `noisy_dense`
 - `stochastic_depth`
 
@@ -517,6 +526,17 @@ matrix is connectivity-masked and scaled by its Frobenius norm, an upper bound
 on the spectral radius. Options include `connectivity`, `leaky`,
 `spectral_radius`, `use_bias`, `activation = "tanh" | "linear"`, and
 `return_sequences`. `tfa.layers.ESN` is an alias.
+
+`multi_head_attention(graph, query, key, value, options)` implements scaled
+dot-product multi-head attention for rank-3 tensors. It accepts
+`query_shape`/`key_shape`/`value_shape`, `num_heads`, `key_dim`, `value_dim`,
+and `use_bias`, returning the output, attention scores, variables, and
+initializers. `tfa.layers.MultiHeadAttention` is an alias.
+
+`rms_normalization`, `unit_normalization`, and `standardize` provide last-axis
+(or `options.axis`) normalization variants. `local_response_normalization`
+wraps TensorFlow's LRN op with configurable `depth_radius`, `bias`, `alpha`,
+and `beta`. Their capitalized aliases are available.
 
 `noisy_dense(graph, input, units, options)` follows `tfa.layers.NoisyDense`:
 it learns mean and sigma kernel/bias variables and multiplies the sigma terms
@@ -816,8 +836,8 @@ It never imports Python or an external tqdm package.
 | Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink`, `snake` | additional activation wrappers |
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss`, `lifted`, `weighted_kappa`, `sparsemax` | hard triplet and further specialized losses |
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
-| Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize` | further normalization variants |
-| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `gelu`, `spatial_pyramid_pooling_2d`, `esn`, `noisy_dense`, `stochastic_depth` | multi-head attention |
+| Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize`, `rms_normalization`, `unit_normalization`, `standardize`, `local_response_normalization` | further normalization variants |
+| Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `gelu`, `spatial_pyramid_pooling_2d`, `esn`, `multi_head_attention`, `noisy_dense`, `stochastic_depth` | further layers |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
 | Image | horizontal/vertical flips, brightness, contrast, saturation/hue, random color/crop augmentation, HSV-in-YIQ, gamma, RGB/HSV/grayscale conversion, nearest/bilinear/bicubic/area resize, `crop_and_resize`, bounding-box pad/crop/resize, `central_crop`, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translations_to_projective_transforms`, `flat_transforms_to_matrices`, `matrices_to_flat_transforms`, `shear_x`, `shear_y`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger`, `TQDMProgressBar` | further progress reporting |

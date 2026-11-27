@@ -1652,4 +1652,216 @@ end
 
 Layers.ESN = Layers.esn
 
+-- Multi-head scaled dot-product attention over rank-3 tensors.
+function Layers.multi_head_attention(graph, query, key, value, options)
+  options = options or {}
+  local name = options.name or "multi_head_attention"
+  local dtype = options.dtype or query.dtype or "float32"
+  local query_shape = options.query_shape or options.input_shape or query.shape
+  local key_shape = options.key_shape or query_shape
+  local value_shape = options.value_shape or key_shape
+  for _, shape in ipairs({ query_shape, key_shape, value_shape }) do
+    if type(shape) ~= "table" or #shape ~= 3 then
+      error(name .. " requires rank-3 query, key, and value shapes", 3)
+    end
+    for _, dimension in ipairs(shape) do
+      if type(dimension) ~= "number" or dimension < 1 then
+        error(name .. " requires static attention dimensions", 3)
+      end
+    end
+  end
+  local heads = options.num_heads or 1
+  local key_dim = options.key_dim or query_shape[3]
+  local value_dim = options.value_dim or key_dim
+  for _, value_ in ipairs({ heads, key_dim, value_dim }) do
+    if type(value_) ~= "number" or value_ % 1 ~= 0 or value_ < 1 then
+      error(name .. " num_heads, key_dim, and value_dim must be positive integers",
+        3)
+    end
+  end
+  local use_bias = options.use_bias ~= false
+  local batch, query_steps, query_dim = query_shape[1], query_shape[2],
+    query_shape[3]
+  local key_steps, key_input_dim = key_shape[2], key_shape[3]
+  local value_steps, value_input_dim = value_shape[2], value_shape[3]
+  local bound_q = 1 / math.sqrt(query_dim)
+  local bound_k = 1 / math.sqrt(key_input_dim)
+  local bound_v = 1 / math.sqrt(value_input_dim)
+  local q_kernel = tf.variable(graph,
+    random_array({ query_dim, heads * key_dim }, bound_q),
+    name .. "/query_kernel", { dtype = dtype })
+  local k_kernel = tf.variable(graph,
+    random_array({ key_input_dim, heads * key_dim }, bound_k),
+    name .. "/key_kernel", { dtype = dtype })
+  local v_kernel = tf.variable(graph,
+    random_array({ value_input_dim, heads * value_dim }, bound_v),
+    name .. "/value_kernel", { dtype = dtype })
+  local output_kernel = tf.variable(graph,
+    random_array({ heads * value_dim, query_dim }, 1 / math.sqrt(heads *
+      value_dim)), name .. "/output_kernel", { dtype = dtype })
+  local variables = { q_kernel, k_kernel, v_kernel, output_kernel }
+  local initializers = { q_kernel.initializer, k_kernel.initializer,
+    v_kernel.initializer, output_kernel.initializer }
+  local q_bias, k_bias, v_bias, output_bias
+  if use_bias then
+    q_bias = tf.variable(graph, filled({ heads * key_dim }, 0),
+      name .. "/query_bias", { dtype = dtype })
+    k_bias = tf.variable(graph, filled({ heads * key_dim }, 0),
+      name .. "/key_bias", { dtype = dtype })
+    v_bias = tf.variable(graph, filled({ heads * value_dim }, 0),
+      name .. "/value_bias", { dtype = dtype })
+    output_bias = tf.variable(graph, filled({ query_dim }, 0),
+      name .. "/output_bias", { dtype = dtype })
+    for _, variable in ipairs({ q_bias, k_bias, v_bias, output_bias }) do
+      variables[#variables + 1] = variable
+      initializers[#initializers + 1] = variable.initializer
+    end
+  end
+  local function project(input, kernel, bias, steps, input_dim, output_dim,
+      label)
+    local flat = tf.reshape(graph, input, { -1, input_dim },
+      name .. "/" .. label .. "_flat", dtype)
+    local projected = tf.matmul(graph, flat, kernel.read,
+      name .. "/" .. label .. "_projected", dtype)
+    if bias ~= nil then
+      projected = tf.add(graph, projected, bias.read,
+        name .. "/" .. label .. "_biased", dtype)
+    end
+    projected = tf.reshape(graph, projected,
+      { batch, steps, heads, output_dim }, name .. "/" .. label .. "_heads",
+      dtype)
+    return tf.transpose(graph, projected, { 0, 2, 1, 3 },
+      name .. "/" .. label .. "_transposed", dtype)
+  end
+  local q = project(query, q_kernel, q_bias, query_steps, query_dim, key_dim,
+    "query")
+  local k = project(key, k_kernel, k_bias, key_steps, key_input_dim, key_dim,
+    "key")
+  local v = project(value, v_kernel, v_bias, value_steps, value_input_dim,
+    value_dim, "value")
+  local scores = tf.batch_matmul(graph, q, k, name .. "/scores", dtype,
+    { adj_y = true })
+  scores = tf.mul(graph, scores, tf.constant(graph,
+    1 / math.sqrt(key_dim), name .. "/scale", dtype), name .. "/scaled_scores",
+    dtype)
+  local attention = tf.nn.softmax(graph, scores, name .. "/attention", dtype)
+  local context = tf.batch_matmul(graph, attention, v,
+    name .. "/context_heads", dtype)
+  context = tf.transpose(graph, context, { 0, 2, 1, 3 },
+    name .. "/context_transposed", dtype)
+  context = tf.reshape(graph, context, { batch, query_steps,
+    heads * value_dim }, name .. "/context", dtype)
+  local flat_context = tf.reshape(graph, context, { -1, heads * value_dim },
+    name .. "/context_flat", dtype)
+  local output = tf.matmul(graph, flat_context, output_kernel.read,
+    name .. "/output_projected", dtype)
+  if output_bias ~= nil then
+    output = tf.add(graph, output, output_bias.read,
+      name .. "/output_biased", dtype)
+  end
+  output = tf.reshape(graph, output, { batch, query_steps,
+    query_dim }, name .. "/output", dtype)
+  return {
+    output = output,
+    attention = attention,
+    variables = variables,
+    initializers = initializers,
+    num_heads = heads,
+    key_dim = key_dim,
+    value_dim = value_dim,
+  }
+end
+
+Layers.MultiHeadAttention = Layers.multi_head_attention
+
+local function normalization_result(graph, input, epsilon, axes, name, dtype)
+  local squared = tf.square(graph, input, name .. "/squared", dtype)
+  local mean_square = tf.reduce_mean(graph, squared, axes,
+    name .. "/mean_square", dtype, true)
+  local scale = rsqrt(graph, tf.add(graph, mean_square,
+    tf.constant(graph, epsilon, name .. "/epsilon", dtype),
+    name .. "/denominator", dtype), name .. "/scale", dtype)
+  return tf.mul(graph, input, scale, name .. "/output", dtype)
+end
+
+function Layers.rms_normalization(graph, input, options)
+  options = options or {}
+  local name = options.name or "rms_normalization"
+  local dtype = options.dtype or input.dtype or "float32"
+  local epsilon = options.epsilon or 1e-6
+  local axis = options.axis or -1
+  if type(axis) == "number" then axis = { axis } end
+  if type(epsilon) ~= "number" or epsilon <= 0 then
+    error(name .. " epsilon must be positive", 3)
+  end
+  return {
+    output = normalization_result(graph, input, epsilon, axis, name, dtype),
+    epsilon = epsilon,
+    axis = axis,
+  }
+end
+
+Layers.RMSNormalization = Layers.rms_normalization
+
+function Layers.unit_normalization(graph, input, options)
+  options = options or {}
+  local name = options.name or "unit_normalization"
+  local dtype = options.dtype or input.dtype or "float32"
+  local epsilon = options.epsilon or 1e-12
+  local axis = options.axis or -1
+  if type(axis) == "number" then axis = { axis } end
+  local squared = tf.square(graph, input, name .. "/squared", dtype)
+  local norm = tf.sqrt(graph, tf.reduce_sum(graph, squared, axis,
+    name .. "/norm_squared", dtype, true), name .. "/norm", dtype)
+  norm = Ops.maximum(graph, norm, tf.constant(graph, epsilon,
+    name .. "/epsilon", dtype), name .. "/safe_norm", dtype)
+  return {
+    output = tf.div(graph, input, norm, name .. "/output", dtype),
+    epsilon = epsilon,
+    axis = axis,
+  }
+end
+
+Layers.UnitNormalization = Layers.unit_normalization
+
+function Layers.standardize(graph, input, options)
+  options = options or {}
+  local name = options.name or "standardize"
+  local dtype = options.dtype or input.dtype or "float32"
+  local epsilon = options.epsilon or 1e-6
+  local axis = options.axis or -1
+  if type(axis) == "number" then axis = { axis } end
+  local mean = tf.reduce_mean(graph, input, axis, name .. "/mean", dtype, true)
+  local centered = tf.sub(graph, input, mean, name .. "/centered", dtype)
+  local squared = tf.square(graph, centered, name .. "/squared", dtype)
+  local variance = tf.reduce_mean(graph, squared, axis,
+    name .. "/variance", dtype, true)
+  local scale = rsqrt(graph, tf.add(graph, variance,
+    tf.constant(graph, epsilon, name .. "/epsilon", dtype),
+    name .. "/denominator", dtype), name .. "/scale", dtype)
+  return {
+    output = tf.mul(graph, centered, scale, name .. "/output", dtype),
+    epsilon = epsilon,
+    axis = axis,
+  }
+end
+
+Layers.Standardize = Layers.standardize
+
+function Layers.local_response_normalization(graph, input, options)
+  options = options or {}
+  local name = options.name or "local_response_normalization"
+  local dtype = options.dtype or input.dtype or "float32"
+  local desc = graph:new_operation("LRN", name)
+  desc:add_input(input)
+  desc:set_type("T", dtype)
+  desc:set_int("depth_radius", options.depth_radius or 5)
+  desc:set_float("bias", options.bias or 1)
+  desc:set_float("alpha", options.alpha or 1)
+  desc:set_float("beta", options.beta or 0.5)
+  return desc:finish()
+end
+
+Layers.LocalResponseNormalization = Layers.local_response_normalization
+
 return Layers

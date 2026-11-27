@@ -3076,6 +3076,77 @@ test("central_crop extracts the centered fraction", function()
   assert_true(tfa.image.CentralCrop == tfa.image.central_crop)
 end)
 
+test("multi_head_attention produces normalized attention", function()
+  local graph = tf.Graph.new()
+  local query = tf.placeholder(graph, "float32", { 1, 2, 2 }, "mha_query")
+  local key = tf.placeholder(graph, "float32", { 1, 2, 2 }, "mha_key")
+  local value = tf.placeholder(graph, "float32", { 1, 2, 2 }, "mha_value")
+  local layer = tfa.layers.multi_head_attention(graph, query, key, value,
+    { query_shape = { 1, 2, 2 }, key_shape = { 1, 2, 2 },
+      value_shape = { 1, 2, 2 }, num_heads = 1, name = "mha" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { unpack(layer.initializers) })
+  local values = session:run({
+    [query] = { { { 1, 2 }, { 3, 4 } } },
+    [key] = { { { 1, 2 }, { 3, 4 } } },
+    [value] = { { { 1, 2 }, { 3, 4 } } },
+  }, { layer.output, layer.attention })
+  assert_eq(table.concat(values[1]:shape(), ","), "1,2,2")
+  assert_eq(table.concat(values[2]:shape(), ","), "1,1,2,2")
+  local attention = values[2]:totable()[1][1][1]
+  near(attention[1] + attention[2], 1, 1e-6, "attention row sum")
+  assert_eq(#layer.variables, 8)
+  assert_true(tfa.layers.MultiHeadAttention ==
+    tfa.layers.multi_head_attention)
+  session:close()
+end)
+
+test("rms_normalization scales by the root mean square", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2 }, "rms_input")
+  local layer = tfa.layers.rms_normalization(graph, input, { name = "rms" })
+  local values = run(graph, { [input] = { { 1, 3 } } }, layer.output)[1]
+  near(values[1], 1 / math.sqrt(5), 1e-6, "RMS first")
+  near(values[2], 3 / math.sqrt(5), 1e-6, "RMS second")
+  assert_true(tfa.layers.RMSNormalization == tfa.layers.rms_normalization)
+end)
+
+test("unit_normalization produces L2 unit rows", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2 }, "unit_input")
+  local layer = tfa.layers.unit_normalization(graph, input,
+    { name = "unit" })
+  local values = run(graph, { [input] = { { 1, 3 } } }, layer.output)[1]
+  near(values[1], 1 / math.sqrt(10), 1e-6, "unit first")
+  near(values[2], 3 / math.sqrt(10), 1e-6, "unit second")
+  near(values[1] * values[1] + values[2] * values[2], 1, 1e-6, "unit norm")
+  assert_true(tfa.layers.UnitNormalization == tfa.layers.unit_normalization)
+end)
+
+test("standardize centers and scales rows", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2 }, "std_input")
+  local layer = tfa.layers.standardize(graph, input, { name = "std" })
+  local values = run(graph, { [input] = { { 1, 3 } } }, layer.output)[1]
+  near(values[1], -1, 1e-6, "standardize first")
+  near(values[2], 1, 1e-6, "standardize second")
+  assert_true(tfa.layers.Standardize == tfa.layers.standardize)
+end)
+
+test("local_response_normalization applies cross-channel scaling", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "lrn_input")
+  local layer = tfa.layers.local_response_normalization(graph, input,
+    { depth_radius = 1, name = "lrn" })
+  local values = run(graph, { [input] = { { { { 1, 1, 1 } } } } },
+    layer)[1][1][1]
+  near(values[1], 1 / math.sqrt(3), 1e-6, "LRN first")
+  near(values[2], 0.5, 1e-6, "LRN middle")
+  assert_true(tfa.layers.LocalResponseNormalization ==
+    tfa.layers.local_response_normalization)
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3378,6 +3449,14 @@ test("new parity options reject invalid values", function()
     0, { input_shape = { 1, 3, 3, 1 } })
   assert_true(not invalid_central_crop,
     "central_crop should reject fractions outside (0, 1]")
+  local invalid_mha = pcall(tfa.layers.multi_head_attention, graph, input,
+    input, input, { query_shape = { 1, 3, 3, 1 }, num_heads = 0 })
+  assert_true(not invalid_mha,
+    "multi_head_attention should reject non-positive heads")
+  local invalid_rms = pcall(tfa.layers.rms_normalization, graph, input,
+    { epsilon = 0 })
+  assert_true(not invalid_rms,
+    "rms_normalization should reject non-positive epsilon")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
