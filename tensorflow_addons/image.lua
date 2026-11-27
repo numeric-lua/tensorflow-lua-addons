@@ -32,13 +32,19 @@ end
 function Image.adjust_saturation(graph, input, saturation, name)
   name = name or "adjust_saturation"
   local dtype = input.dtype or "float32"
-  if type(saturation) ~= "number" or saturation ~= saturation or
-      saturation < 0 or saturation == math.huge then
-    error("adjust_saturation requires a finite non-negative saturation", 3)
+  local scale
+  if type(saturation) == "number" then
+    if saturation ~= saturation or saturation < 0 or saturation == math.huge then
+      error("adjust_saturation requires a finite non-negative saturation", 3)
+    end
+    scale = tf.constant(graph, saturation, name .. "/scale", "float32")
+  else
+    scale = tf.cast(graph, saturation, saturation.dtype or "float32",
+      "float32", name .. "/scale")
   end
   local desc = graph:new_operation("AdjustSaturation", name)
   desc:add_input(input)
-  desc:add_input(tf.constant(graph, saturation, name .. "/scale", "float32"))
+  desc:add_input(scale)
   desc:set_type("T", dtype)
   return desc:finish()
 end
@@ -50,13 +56,19 @@ Image.AdjustSaturation = Image.adjust_saturation
 function Image.adjust_hue(graph, input, delta, name)
   name = name or "adjust_hue"
   local dtype = input.dtype or "float32"
-  if type(delta) ~= "number" or delta ~= delta or delta == math.huge or
-      delta == -math.huge then
-    error("adjust_hue requires a finite hue delta", 3)
+  local delta_op
+  if type(delta) == "number" then
+    if delta ~= delta or delta == math.huge or delta == -math.huge then
+      error("adjust_hue requires a finite hue delta", 3)
+    end
+    delta_op = tf.constant(graph, delta, name .. "/delta", "float32")
+  else
+    delta_op = tf.cast(graph, delta, delta.dtype or "float32", "float32",
+      name .. "/delta")
   end
   local desc = graph:new_operation("AdjustHue", name)
   desc:add_input(input)
-  desc:add_input(tf.constant(graph, delta, name .. "/delta", "float32"))
+  desc:add_input(delta_op)
   desc:set_type("T", dtype)
   return desc:finish()
 end
@@ -97,14 +109,21 @@ Image.AdjustGamma = Image.adjust_gamma
 function Image.adjust_contrast(graph, input, contrast, name)
   name = name or "adjust_contrast"
   local dtype = input.dtype or "float32"
-  if type(contrast) ~= "number" or contrast ~= contrast or
-      contrast == math.huge or contrast == -math.huge then
-    error("adjust_contrast requires a finite contrast factor", 3)
+  local contrast_op
+  if type(contrast) == "number" then
+    if contrast ~= contrast or contrast == math.huge or
+        contrast == -math.huge then
+      error("adjust_contrast requires a finite contrast factor", 3)
+    end
+    contrast_op = tf.constant(graph, contrast, name .. "/contrast_factor",
+      "float32")
+  else
+    contrast_op = tf.cast(graph, contrast, contrast.dtype or "float32",
+      "float32", name .. "/contrast_factor")
   end
   local desc = graph:new_operation("AdjustContrastv2", name)
   desc:add_input(input)
-  desc:add_input(tf.constant(graph, contrast, name .. "/contrast_factor",
-    "float32"))
+  desc:add_input(contrast_op)
   desc:set_type("T", dtype)
   return desc:finish()
 end
@@ -1752,5 +1771,140 @@ function Image.shear_y(graph, image, level, options)
 end
 
 Image.ShearY = Image.shear_y
+
+local function random_positive(graph, maximum, name, seed, seed2)
+  local desc = graph:new_operation("RandomUniform", name)
+  desc:add_input(tf.constant(graph, {}, name .. "/shape", "int32"))
+  desc:set_type("dtype", "float32")
+  desc:set_int("seed", seed or 0)
+  desc:set_int("seed2", seed2 or 0)
+  local unit = desc:finish()
+  return tf.mul(graph, unit, tf.cast(graph, maximum, "int32", "float32",
+    name .. "/maximum"), name .. "/scaled", "float32")
+end
+
+function Image.random_brightness(graph, input, max_delta, options)
+  options = options or {}
+  local name = options.name or "random_brightness"
+  local dtype = options.dtype or input.dtype or "float32"
+  if type(max_delta) ~= "number" or max_delta ~= max_delta or max_delta < 0 or
+      max_delta == math.huge then
+    error(name .. " max_delta must be finite and non-negative", 3)
+  end
+  local delta = random_uniform_scalar(graph, -max_delta, max_delta,
+    name .. "/delta", dtype, options.seed, options.seed2)
+  return tf.add(graph, input, delta, name, dtype)
+end
+
+Image.RandomBrightness = Image.random_brightness
+
+function Image.random_contrast(graph, input, lower, upper, options)
+  options = options or {}
+  local name = options.name or "random_contrast"
+  if type(lower) ~= "number" or type(upper) ~= "number" or lower ~= lower or
+      upper ~= upper or lower < 0 or upper < lower or upper == math.huge then
+    error(name .. " requires finite bounds with 0 <= lower <= upper", 3)
+  end
+  local factor
+  if lower == upper then
+    factor = tf.constant(graph, lower, name .. "/factor", "float32")
+  else
+    factor = random_uniform_scalar(graph, lower, upper, name .. "/factor",
+      "float32", options.seed, options.seed2)
+  end
+  return Image.adjust_contrast(graph, input, factor, name)
+end
+
+Image.RandomContrast = Image.random_contrast
+
+function Image.random_saturation(graph, input, lower, upper, options)
+  options = options or {}
+  local name = options.name or "random_saturation"
+  if type(lower) ~= "number" or type(upper) ~= "number" or lower ~= lower or
+      upper ~= upper or lower < 0 or upper < lower or upper == math.huge then
+    error(name .. " requires finite bounds with 0 <= lower <= upper", 3)
+  end
+  local factor
+  if lower == upper then
+    factor = tf.constant(graph, lower, name .. "/factor", "float32")
+  else
+    factor = random_uniform_scalar(graph, lower, upper, name .. "/factor",
+      "float32", options.seed, options.seed2)
+  end
+  return Image.adjust_saturation(graph, input, factor, name)
+end
+
+Image.RandomSaturation = Image.random_saturation
+
+function Image.random_hue(graph, input, max_delta, options)
+  options = options or {}
+  local name = options.name or "random_hue"
+  if type(max_delta) ~= "number" or max_delta ~= max_delta or max_delta < 0 or
+      max_delta == math.huge then
+    error(name .. " max_delta must be finite and non-negative", 3)
+  end
+  local delta
+  if max_delta == 0 then
+    delta = tf.constant(graph, 0, name .. "/delta", "float32")
+  else
+    delta = random_uniform_scalar(graph, -max_delta, max_delta,
+      name .. "/delta", "float32", options.seed, options.seed2)
+  end
+  return Image.adjust_hue(graph, input, delta, name .. "/adjust")
+end
+
+Image.RandomHue = Image.random_hue
+
+local function slice_dynamic(graph, input, begin_values, size_values, name,
+    dtype)
+  local desc = graph:new_operation("Slice", name)
+  desc:add_input(input)
+  desc:add_input(pack_int32(graph, begin_values, name .. "/begin"))
+  desc:add_input(pack_int32(graph, size_values, name .. "/size"))
+  desc:set_type("T", dtype)
+  desc:set_type("Index", "int32")
+  return desc:finish()
+end
+
+function Image.random_crop(graph, input, size, options)
+  options = options or {}
+  local name = options.name or "random_crop"
+  local dtype = options.dtype or input.dtype or "float32"
+  if type(size) ~= "table" or #size ~= 2 then
+    error(name .. " requires size = {height, width}", 3)
+  end
+  for _, value in ipairs(size) do
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+      error(name .. " crop dimensions must be positive integers", 3)
+    end
+  end
+  local shape = tf.shape(graph, input, name .. "/shape", dtype)
+  local function dimension(index, label)
+    return tf.gather(graph, shape,
+      tf.constant(graph, index, name .. "/" .. label .. "_index", "int32"), 0,
+      name .. "/" .. label, "int32")
+  end
+  local batch = dimension(0, "batch")
+  local height = dimension(1, "height")
+  local width = dimension(2, "width")
+  local channels = dimension(3, "channels")
+  local one = tf.constant(graph, 1, name .. "/one", "int32")
+  local max_top = tf.add(graph, tf.sub(graph, height,
+    tf.constant(graph, size[1], name .. "/crop_height", "int32"),
+    name .. "/top_range", "int32"), one, name .. "/top_max", "int32")
+  local max_left = tf.add(graph, tf.sub(graph, width,
+    tf.constant(graph, size[2], name .. "/crop_width", "int32"),
+    name .. "/left_range", "int32"), one, name .. "/left_max", "int32")
+  local top = tf.cast(graph, floor_float(graph, random_positive(graph,
+    max_top, name .. "/top_random", options.seed, options.seed2),
+    name .. "/top_floor", "float32"), "float32", "int32", name .. "/top")
+  local left = tf.cast(graph, floor_float(graph, random_positive(graph,
+    max_left, name .. "/left_random", options.seed, options.seed2),
+    name .. "/left_floor", "float32"), "float32", "int32", name .. "/left")
+  return slice_dynamic(graph, input, { 0, top, left, 0 },
+    { batch, size[1], size[2], channels }, name, dtype)
+end
+
+Image.RandomCrop = Image.random_crop
 
 return Image

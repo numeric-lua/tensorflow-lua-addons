@@ -29,7 +29,9 @@
 - translation-to-projective-transform helper;
 - flat-transform/matrix conversion helpers;
 - horizontal and vertical image shear helpers;
-- 120 graph-mode tests.
+- random brightness, contrast, saturation, and hue augmentation helpers;
+- random image crop helper;
+- 125 graph-mode tests.
 
 ## 0.17.0
 

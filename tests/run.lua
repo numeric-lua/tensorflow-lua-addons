@@ -2788,6 +2788,96 @@ test("shear_y shifts columns vertically", function()
   assert_true(tfa.image.ShearY == tfa.image.shear_y)
 end)
 
+test("random_brightness applies one shared delta", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 3 },
+    "rand_bright_input")
+  local zero = tfa.image.random_brightness(graph, input, 0,
+    { name = "rand_bright_zero" })
+  local random = tfa.image.random_brightness(graph, input, 0.5,
+    { name = "rand_bright_random", seed = 7 })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { 1, 1, 1 }, { 1, 1, 1 } },
+    { { 1, 1, 1 }, { 1, 1, 1 } },
+  } } }, { zero, random })
+  near(values[1]:totable()[1][1][1][1], 1, 1e-6, "zero brightness")
+  local first = values[2]:totable()[1][1][1][1]
+  local last = values[2]:totable()[1][2][2][1]
+  near(first, last, 1e-6, "brightness shared delta")
+  assert_true(first >= 0.5 - 1e-6 and first <= 1.5 + 1e-6,
+    "brightness delta out of bounds")
+  assert_true(tfa.image.RandomBrightness == tfa.image.random_brightness)
+  session:close()
+end)
+
+test("random_contrast applies a bounded contrast factor", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 1 },
+    "rand_contrast_input")
+  local output = tfa.image.random_contrast(graph, input, 2, 2,
+    { name = "rand_contrast" })
+  local values = run(graph, { [input] = { { { { 1 }, { 2 } },
+    { { 3 }, { 4 } } } } }, output)[1]
+  near(values[1][1][1], -0.5, 1e-6, "random contrast top-left")
+  near(values[2][2][1], 5.5, 1e-6, "random contrast bottom-right")
+  assert_true(tfa.image.RandomContrast == tfa.image.random_contrast)
+end)
+
+test("random_saturation applies a bounded saturation factor", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "rand_sat_input")
+  local zero = tfa.image.random_saturation(graph, input, 0, 0,
+    { name = "rand_sat_zero" })
+  local one = tfa.image.random_saturation(graph, input, 1, 1,
+    { name = "rand_sat_one" })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { { { { 1, 0, 0 } } } } },
+    { zero, one })
+  local gray = values[1]:totable()[1][1][1]
+  local original = values[2]:totable()[1][1][1]
+  for channel = 1, 3 do
+    near(gray[channel], 1, 1e-6, "random saturation zero")
+  end
+  near(original[1], 1, 1e-6, "random saturation identity red")
+  near(original[2], 0, 1e-6, "random saturation identity green")
+  assert_true(tfa.image.RandomSaturation == tfa.image.random_saturation)
+  session:close()
+end)
+
+test("random_hue applies a bounded hue delta", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "rand_hue_input")
+  local output = tfa.image.random_hue(graph, input, 0,
+    { name = "rand_hue" })
+  local values = run(graph, { [input] = { { { { 1, 0, 0 } } } } }, output)[1]
+    [1][1]
+  near(values[1], 1, 1e-6, "random hue red")
+  near(values[2], 0, 1e-6, "random hue green")
+  near(values[3], 0, 1e-6, "random hue blue")
+  assert_true(tfa.image.RandomHue == tfa.image.random_hue)
+end)
+
+test("random_crop returns a valid crop", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 2, 2, 3 },
+    "rand_crop_input")
+  local output = tfa.image.random_crop(graph, input, { 2, 2 },
+    { name = "rand_crop", seed = 4 })
+  local session = tf.Session.new(graph)
+  local values = session:run({ [input] = { {
+    { { 1, 1, 1 }, { 2, 2, 2 } },
+    { { 3, 3, 3 }, { 4, 4, 4 } },
+  } } }, { output })[1]
+  assert_eq(table.concat(values:shape(), ","), "1,2,2,3")
+  near(values:totable()[1][1][1][1], 1, 1e-6, "random crop first")
+  near(values:totable()[1][2][2][1], 4, 1e-6, "random crop last")
+  assert_true(tfa.image.RandomCrop == tfa.image.random_crop)
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3036,6 +3126,25 @@ test("new parity options reject invalid values", function()
     { frequency = 0 })
   assert_true(not invalid_snake_layer,
     "Snake layer should reject non-positive frequencies")
+  local invalid_brightness = pcall(tfa.image.random_brightness, graph, input,
+    -1)
+  assert_true(not invalid_brightness,
+    "random_brightness should reject negative max_delta")
+  local invalid_random_contrast = pcall(tfa.image.random_contrast, graph,
+    input, 2, 1)
+  assert_true(not invalid_random_contrast,
+    "random_contrast should reject inverted bounds")
+  local invalid_random_saturation = pcall(tfa.image.random_saturation, graph,
+    input, -1, 1)
+  assert_true(not invalid_random_saturation,
+    "random_saturation should reject negative bounds")
+  local invalid_random_hue = pcall(tfa.image.random_hue, graph, input, -1)
+  assert_true(not invalid_random_hue,
+    "random_hue should reject negative max_delta")
+  local invalid_random_crop = pcall(tfa.image.random_crop, graph, input, { 0,
+    2 })
+  assert_true(not invalid_random_crop,
+    "random_crop should reject non-positive sizes")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
