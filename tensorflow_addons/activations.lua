@@ -92,4 +92,67 @@ function Activations.snake(graph, input, frequency, name, dtype)
   return tf.add(graph, input, periodic, name .. "/output", dtype)
 end
 
+-- Hard sigmoid: clip(0.2 * x + 0.5, 0, 1).
+function Activations.hard_sigmoid(graph, input, name, dtype)
+  name = name or "hard_sigmoid"
+  dtype = dtype or "float32"
+  local scaled = tf.add(graph, tf.mul(graph,
+    tf.constant(graph, 0.2, name .. "/slope", dtype), input,
+    name .. "/scaled", dtype), tf.constant(graph, 0.5, name .. "/offset",
+    dtype), name .. "/shifted", dtype)
+  return tf.clip_by_value(graph, scaled, 0, 1, name .. "/output", dtype)
+end
+
+function Activations.softsign(graph, input, name, dtype)
+  name = name or "softsign"
+  dtype = dtype or "float32"
+  local denominator = tf.add(graph, tf.constant(graph, 1, name .. "/one",
+    dtype), tf.abs(graph, input, name .. "/abs", dtype),
+    name .. "/denominator", dtype)
+  return tf.div(graph, input, denominator, name .. "/output", dtype)
+end
+
+function Activations.softplus(graph, input, name, dtype)
+  name = name or "softplus"
+  dtype = dtype or "float32"
+  return tf.nn.softplus(graph, input, name .. "/output", dtype)
+end
+
+local function elu_value(graph, input, alpha, name, dtype)
+  local positive = tf.greater(graph, input, tf.constant(graph, 0,
+    name .. "/zero", dtype), name .. "/positive", dtype)
+  local negative = tf.mul(graph, tf.constant(graph, alpha, name .. "/alpha",
+    dtype), tf.sub(graph, tf.exp(graph, input, name .. "/exp", dtype),
+    tf.constant(graph, 1, name .. "/one", dtype), name .. "/exp_minus_one",
+    dtype), name .. "/negative", dtype)
+  return tf.where(graph, positive, input, negative, name .. "/output", dtype)
+end
+
+-- Exponential linear unit: x for positive inputs, alpha*(exp(x)-1) otherwise.
+function Activations.elu(graph, input, alpha, name, dtype)
+  if type(alpha) == "string" then
+    dtype = name
+    name = alpha
+    alpha = nil
+  end
+  name = name or "elu"
+  dtype = dtype or "float32"
+  alpha = alpha or 1
+  if type(alpha) ~= "number" or alpha ~= alpha or alpha == math.huge then
+    error("elu alpha must be a finite number", 3)
+  end
+  return elu_value(graph, input, alpha, name, dtype)
+end
+
+-- Scaled exponential linear unit with the standard SELU constants.
+function Activations.selu(graph, input, name, dtype)
+  name = name or "selu"
+  dtype = dtype or "float32"
+  local alpha = 1.6732632423543772
+  local scale = 1.0507009873554805
+  local value = elu_value(graph, input, alpha, name .. "/elu", dtype)
+  return tf.mul(graph, value, tf.constant(graph, scale, name .. "/scale",
+    dtype), name .. "/output", dtype)
+end
+
 return Activations

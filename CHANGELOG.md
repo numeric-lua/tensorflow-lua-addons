@@ -43,7 +43,8 @@
 - RectifiedAdam, Adamax, and RMSprop optimizers;
 - SGDW momentum/Nesterov and nuclear-norm ConditionalGradient support;
 - binary, categorical, sparse, and top-k accuracy metrics;
-- 155 graph-mode tests.
+- hard sigmoid, softsign, softplus, ELU, and SELU activations;
+- 160 graph-mode tests.
 
 ## 0.17.0
 

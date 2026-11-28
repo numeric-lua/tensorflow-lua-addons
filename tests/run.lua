@@ -3395,6 +3395,54 @@ test("sparse_top_k_categorical_accuracy checks integer labels", function()
     tfa.metrics.sparse_top_k_categorical_accuracy)
 end)
 
+test("hard_sigmoid clips the affine transform", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 3 }, "hard_sigmoid_input")
+  local output = tfa.activations.hard_sigmoid(graph, input, "hard_sigmoid")
+  local values = run(graph, { [input] = { -4, 0, 4 } }, output)
+  near(values[1], 0, 1e-6, "hard sigmoid low")
+  near(values[2], 0.5, 1e-6, "hard sigmoid center")
+  near(values[3], 1, 1e-6, "hard sigmoid high")
+end)
+
+test("softsign normalizes by one plus absolute value", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2 }, "softsign_input")
+  local output = tfa.activations.softsign(graph, input, "softsign")
+  local values = run(graph, { [input] = { 1, -1 } }, output)
+  near(values[1], 0.5, 1e-6, "softsign positive")
+  near(values[2], -0.5, 1e-6, "softsign negative")
+end)
+
+test("softplus is log(1 + exp(x))", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1 }, "softplus_input")
+  local output = tfa.activations.softplus(graph, input, "softplus")
+  local values = run(graph, { [input] = { 0 } }, output)
+  near(values[1], math.log(2), 1e-6, "softplus zero")
+end)
+
+test("elu preserves positives and exponentiates negatives", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2 }, "elu_input")
+  local output = tfa.activations.elu(graph, input, "elu")
+  local values = run(graph, { [input] = { -1, 1 } }, output)
+  near(values[1], math.exp(-1) - 1, 1e-6, "elu negative")
+  near(values[2], 1, 1e-6, "elu positive")
+end)
+
+test("selu applies the standard scale and alpha", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 2 }, "selu_input")
+  local output = tfa.activations.selu(graph, input, "selu")
+  local values = run(graph, { [input] = { -1, 1 } }, output)
+  local scale = 1.0507009873554805
+  local alpha = 1.6732632423543772
+  near(values[1], scale * alpha * (math.exp(-1) - 1), 1e-6,
+    "selu negative")
+  near(values[2], scale, 1e-6, "selu positive")
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3717,6 +3765,9 @@ test("new parity options reject invalid values", function()
     input, input, { k = 0 })
   assert_true(not invalid_top_k,
     "top_k_categorical_accuracy should reject non-positive k")
+  local invalid_elu = pcall(tfa.activations.elu, graph, input, math.huge)
+  assert_true(not invalid_elu,
+    "elu should reject non-finite alpha")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
