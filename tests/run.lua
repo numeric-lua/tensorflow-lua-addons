@@ -3147,6 +3147,73 @@ test("local_response_normalization applies cross-channel scaling", function()
     tfa.layers.local_response_normalization)
 end)
 
+test("rgb_to_yuv converts primary colors", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "rgb_yuv_input")
+  local output = tfa.image.rgb_to_yuv(graph, input, "rgb_yuv")
+  local values = run(graph, { [input] = { { { { 1, 0, 0 } } } } }, output)[1]
+    [1][1]
+  near(values[1], 0.299, 1e-6, "Y channel")
+  near(values[2], -0.14713, 1e-6, "U channel")
+  near(values[3], 0.615, 1e-6, "V channel")
+  assert_true(tfa.image.RGBToYUV == tfa.image.rgb_to_yuv)
+end)
+
+test("yuv_to_rgb reconstructs primary colors", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "yuv_rgb_input")
+  local output = tfa.image.yuv_to_rgb(graph, input, "yuv_rgb")
+  local values = run(graph, { [input] = { { { { 0.299, -0.14713, 0.615 } } } } },
+    output)[1][1][1]
+  near(values[1], 1, 1e-5, "YUV red")
+  near(values[2], 0, 1e-4, "YUV green")
+  near(values[3], 0, 1e-4, "YUV blue")
+  assert_true(tfa.image.YUVToRGB == tfa.image.yuv_to_rgb)
+end)
+
+test("rgb_to_yiq converts primary colors", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "rgb_yiq_input")
+  local output = tfa.image.rgb_to_yiq(graph, input, "rgb_yiq")
+  local values = run(graph, { [input] = { { { { 1, 0, 0 } } } } }, output)[1]
+    [1][1]
+  near(values[1], 0.299, 1e-6, "YIQ Y")
+  near(values[2], 0.587, 1e-6, "YIQ I")
+  near(values[3], 0.114, 1e-6, "YIQ Q")
+  assert_true(tfa.image.RGBToYIQ == tfa.image.rgb_to_yiq)
+end)
+
+test("yiq_to_rgb reconstructs primary colors", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "float32", { 1, 1, 1, 3 },
+    "yiq_rgb_input")
+  local output = tfa.image.yiq_to_rgb(graph, input, "yiq_rgb")
+  local values = run(graph, { [input] = { { { { 0.299, 0.587, 0.114 } } } } },
+    output)[1][1][1]
+  near(values[1], 1, 1e-5, "YIQ red")
+  near(values[2], 0, 1e-5, "YIQ green")
+  near(values[3], 0, 1e-5, "YIQ blue")
+  assert_true(tfa.image.YIQToRGB == tfa.image.yiq_to_rgb)
+end)
+
+test("equalize applies a histogram lookup table", function()
+  local graph = tf.Graph.new()
+  local input = tf.placeholder(graph, "uint8", { 2, 3, 1 }, "equalize_input")
+  local output = tfa.image.equalize(graph, input,
+    { bins = 4, input_shape = { 2, 3, 1 }, name = "equalize" })
+  local values = run(graph, { [input] = {
+    { { 0 }, { 0 }, { 1 } },
+    { { 2 }, { 2 }, { 2 } },
+  } }, output)
+  near(values[1][1][1], 0, 0, "equalize zero")
+  near(values[1][3][1], 2, 0, "equalize one")
+  near(values[2][1][1], 3, 0, "equalize two")
+  assert_true(tfa.image.Equalize == tfa.image.equalize)
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3457,6 +3524,10 @@ test("new parity options reject invalid values", function()
     { epsilon = 0 })
   assert_true(not invalid_rms,
     "rms_normalization should reject non-positive epsilon")
+  local invalid_equalize = pcall(tfa.image.equalize, graph, input,
+    { bins = 1, input_shape = { 1, 3, 3, 1 } })
+  assert_true(not invalid_equalize,
+    "equalize should reject fewer than two bins")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

@@ -127,6 +127,10 @@ local gamma = tfa.image.adjust_gamma(graph, image, 0.8, 1)
 local contrasted = tfa.image.adjust_contrast(graph, image, 1.2)
 local hsv_image = tfa.image.rgb_to_hsv(graph, image)
 local gray_image = tfa.image.rgb_to_grayscale(graph, image)
+local yuv_image = tfa.image.rgb_to_yuv(graph, image)
+local yiq_image = tfa.image.rgb_to_yiq(graph, image)
+local equalized = tfa.image.equalize(graph, image,
+  { input_shape = { 1, 8, 8, 3 } })
 local warped = tfa.image.dense_image_warp(graph, image, flow)
 local transformed = tfa.image.transform(graph, image,
   { 1, 0, 0, 0, 1, 0, 0, 0 })
@@ -641,6 +645,11 @@ the resolved `sync_period`/`slow_step_size`.
 - `hsv_to_rgb`
 - `rgb_to_grayscale`
 - `grayscale_to_rgb`
+- `rgb_to_yuv`
+- `yuv_to_rgb`
+- `rgb_to_yiq`
+- `yiq_to_rgb`
+- `equalize`
 - `transform`
 - `compose_transforms`
 - `angles_to_projective_transforms`
@@ -695,8 +704,14 @@ returns a random contiguous `{height, width}` crop shared by the batch.
 
 `rgb_to_hsv` and `hsv_to_rgb` convert rank-3+ RGB/HSV tensors.
 `rgb_to_grayscale` uses the standard 0.2989/0.587/0.114 luminance weights and
-`grayscale_to_rgb` replicates the grayscale channel. Their capitalized aliases
-are provided for consistency.
+`grayscale_to_rgb` replicates the grayscale channel. `rgb_to_yuv`/`yuv_to_rgb`
+and `rgb_to_yiq`/`yiq_to_rgb` apply the corresponding color-space matrices.
+Their capitalized aliases are provided for consistency.
+
+`equalize(graph, image, options)` performs per-channel histogram equalization
+for static rank-3 HWC or rank-4 NHWC images, following `tfa.image.equalize`.
+`options.bins` defaults to `256`; `options.input_shape` is required.
+`tfa.image.Equalize` is an alias.
 
 `transform(graph, image, transforms, options)` follows `tfa.image.transform`.
 Each transform row is `[a0, a1, a2, b0, b1, b2, c0, c1]` and maps output
@@ -839,7 +854,7 @@ It never imports Python or an external tqdm package.
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize`, `rms_normalization`, `unit_normalization`, `standardize`, `local_response_normalization` | further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `gelu`, `spatial_pyramid_pooling_2d`, `esn`, `multi_head_attention`, `noisy_dense`, `stochastic_depth` | further layers |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
-| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, random color/crop augmentation, HSV-in-YIQ, gamma, RGB/HSV/grayscale conversion, nearest/bilinear/bicubic/area resize, `crop_and_resize`, bounding-box pad/crop/resize, `central_crop`, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translations_to_projective_transforms`, `flat_transforms_to_matrices`, `matrices_to_flat_transforms`, `shear_x`, `shear_y`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
+| Image | horizontal/vertical flips, brightness, contrast, saturation/hue, random color/crop augmentation, HSV-in-YIQ, gamma, RGB/HSV/YUV/YIQ/grayscale conversion, histogram equalization, nearest/bilinear/bicubic/area resize, `crop_and_resize`, bounding-box pad/crop/resize, `central_crop`, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translations_to_projective_transforms`, `flat_transforms_to_matrices`, `matrices_to_flat_transforms`, `shear_x`, `shear_y`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger`, `TQDMProgressBar` | further progress reporting |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
 

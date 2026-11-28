@@ -2051,4 +2051,165 @@ end
 
 Image.CentralCrop = Image.central_crop
 
+local function color_matrix(graph, input, values, name, dtype)
+  local rank = (type(input.shape) == "table" and #input.shape) or 4
+  if rank ~= 3 and rank ~= 4 then
+    error(name .. " supports rank-3 or rank-4 images", 3)
+  end
+  local flat = tf.reshape(graph, input, { -1, 3 }, name .. "/flat", dtype)
+  local transformed = tf.matmul(graph, flat, tf.constant(graph, values,
+    name .. "/matrix", dtype), name .. "/transformed", dtype)
+  local shape = tf.shape(graph, input, name .. "/shape", dtype)
+  return reshape_dynamic(graph, transformed, shape, name, dtype)
+end
+
+function Image.rgb_to_yuv(graph, input, name)
+  name = name or "rgb_to_yuv"
+  local dtype = input.dtype or "float32"
+  return color_matrix(graph, input, {
+    { 0.299, -0.14713, 0.615 },
+    { 0.587, -0.28886, -0.51499 },
+    { 0.114, 0.436, -0.10001 },
+  }, name, dtype)
+end
+
+Image.RGBToYUV = Image.rgb_to_yuv
+
+function Image.yuv_to_rgb(graph, input, name)
+  name = name or "yuv_to_rgb"
+  local dtype = input.dtype or "float32"
+  return color_matrix(graph, input, {
+    { 1, 1, 1 },
+    { 0, -0.39465, 2.03211 },
+    { 1.13983, -0.58060, 0 },
+  }, name, dtype)
+end
+
+Image.YUVToRGB = Image.yuv_to_rgb
+
+function Image.rgb_to_yiq(graph, input, name)
+  name = name or "rgb_to_yiq"
+  local dtype = input.dtype or "float32"
+  return color_matrix(graph, input, {
+    { 0.299, 0.587, 0.114 },
+    { 0.596, -0.274, -0.322 },
+    { 0.211, -0.523, 0.312 },
+  }, name, dtype)
+end
+
+Image.RGBToYIQ = Image.rgb_to_yiq
+
+function Image.yiq_to_rgb(graph, input, name)
+  name = name or "yiq_to_rgb"
+  local dtype = input.dtype or "float32"
+  return color_matrix(graph, input, {
+    { 1, 0.95617069, 0.62143257 },
+    { 1, -0.2726886, -0.64681324 },
+    { 1, -1.103744, 1.70062309 },
+  }, name, dtype)
+end
+
+Image.YIQToRGB = Image.yiq_to_rgb
+
+local function floor_div_int(graph, a, b, name)
+  local desc = graph:new_operation("FloorDiv", name)
+  desc:add_input(a)
+  desc:add_input(b)
+  desc:set_type("T", "int32")
+  return desc:finish()
+end
+
+local function equalize_channel(graph, channel, bins, name, dtype)
+  local values = tf.cast(graph, channel, channel.dtype or dtype, "int32",
+    name .. "/values")
+  local flat = tf.reshape(graph, values, { -1 }, name .. "/flat", "int32")
+  local range = tf.constant(graph, { 0, bins - 1 }, name .. "/range", "int32")
+  local histogram_desc = graph:new_operation("HistogramFixedWidth",
+    name .. "/histogram")
+  histogram_desc:add_input(flat)
+  histogram_desc:add_input(range)
+  histogram_desc:add_input(tf.constant(graph, bins, name .. "/nbins",
+    "int32"))
+  histogram_desc:set_type("T", "int32")
+  histogram_desc:set_type("dtype", "int32")
+  local histogram = histogram_desc:finish()
+  local nonzero = tf.boolean_mask(graph, histogram, tf.not_equal(graph,
+    histogram, tf.constant(graph, 0, name .. "/zero", "int32"),
+    name .. "/nonzero_mask", "int32"), name .. "/nonzero", "int32")
+  local nonzero_shape = tf.shape(graph, nonzero,
+    name .. "/nonzero_shape", "int32")
+  local count = tf.gather(graph, nonzero_shape,
+    tf.constant(graph, 0, name .. "/nonzero_dimension", "int32"), 0,
+    name .. "/nonzero_count", "int32")
+  local last = tf.gather(graph, nonzero, tf.sub(graph, count,
+    tf.constant(graph, 1, name .. "/one", "int32"), name .. "/last_index",
+    "int32"), 0, name .. "/last", "int32")
+  local total = tf.reduce_sum(graph, nonzero, { 0 }, name .. "/total",
+    "int32", false)
+  local step = floor_div_int(graph, tf.sub(graph, total, last,
+    name .. "/step_numerator", "int32"), tf.constant(graph, bins - 1,
+    name .. "/bins_minus_one", "int32"), name .. "/step")
+  local safe_step = tf.maximum(graph, step, tf.constant(graph, 1,
+    name .. "/step_one", "int32"), name .. "/safe_step", "int32")
+  local cumsum = tf.cumsum(graph, histogram, 0, name .. "/cumsum", "int32",
+    true, false)
+  local half_step = floor_div_int(graph, safe_step, tf.constant(graph, 2,
+    name .. "/two", "int32"), name .. "/half_step")
+  local lut = floor_div_int(graph, tf.add(graph, cumsum, half_step,
+    name .. "/lut_numerator", "int32"), safe_step, name .. "/lut")
+  lut = tf.clip_by_value(graph, lut, 0, bins - 1, name .. "/lut_clipped",
+    "int32")
+  local equalized = tf.gather(graph, lut, values, 0, name .. "/equalized",
+    "int32")
+  equalized = tf.where(graph, tf.equal(graph, step, tf.constant(graph, 0,
+    name .. "/step_zero", "int32"), name .. "/step_is_zero", "int32"), values,
+    equalized, name .. "/selected", "int32")
+  return tf.cast(graph, equalized, "int32", channel.dtype or dtype, name)
+end
+
+-- Histogram equalization for rank-3 HWC or rank-4 NHWC static images.
+function Image.equalize(graph, input, options)
+  options = options or {}
+  local name = options.name or "equalize"
+  local dtype = options.dtype or input.dtype or "float32"
+  local bins = options.bins or 256
+  if type(bins) ~= "number" or bins % 1 ~= 0 or bins < 2 then
+    error(name .. " bins must be an integer >= 2", 3)
+  end
+  local shape = options.input_shape or input.shape
+  if type(shape) ~= "table" or (#shape ~= 3 and #shape ~= 4) then
+    error(name .. " requires a static rank-3 or rank-4 input shape", 3)
+  end
+  local rank = #shape
+  local image = input
+  if rank == 3 then
+    image = tf.expand_dims(graph, input, 0, name .. "/batch", dtype)
+    shape = { 1, shape[1], shape[2], shape[3] }
+  end
+  local batch, height, width, channels = shape[1], shape[2], shape[3],
+    shape[4]
+  local batches = {}
+  for batch_index = 1, batch do
+    local channel_outputs = {}
+    for channel_index = 1, channels do
+      local channel = tf.slice(graph, image,
+        { batch_index - 1, 0, 0, channel_index - 1 }, { 1, height, width, 1 },
+        name .. "/slice_" .. batch_index .. "_" .. channel_index, dtype)
+      channel = tf.squeeze(graph, channel, { 0, 3 },
+        name .. "/channel_" .. batch_index .. "_" .. channel_index, dtype)
+      channel_outputs[channel_index] = equalize_channel(graph, channel, bins,
+        name .. "/equalize_" .. batch_index .. "_" .. channel_index, dtype)
+    end
+    batches[batch_index] = tf.stack(graph, channel_outputs, 2,
+      name .. "/batch_image_" .. batch_index, dtype)
+  end
+  local output = tf.stack(graph, batches, 0, name .. "/output", dtype)
+  if rank == 3 then
+    output = tf.squeeze(graph, output, 0, name .. "/unbatch", dtype)
+  end
+  return output
+end
+
+Image.Equalize = Image.equalize
+
 return Image

@@ -38,7 +38,9 @@
 - bounding-box pad/crop and centered resize/crop image helpers;
 - multi-head scaled dot-product attention layer;
 - RMS, unit, standardization, and local-response normalization layers;
-- 140 graph-mode tests.
+- YUV and YIQ color-space conversion helpers;
+- histogram-equalization image helper;
+- 145 graph-mode tests.
 
 ## 0.17.0
 
