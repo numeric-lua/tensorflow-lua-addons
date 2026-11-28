@@ -41,6 +41,13 @@ local lifted = tfa.losses.lifted(graph, class_ids, embeddings)
 local kappa_loss = tfa.losses.weighted_kappa(graph, one_hot_labels, scores,
   { num_classes = 4 })
 local sparse_loss = tfa.losses.sparsemax(graph, logits, one_hot_labels)
+local binary_acc = tfa.metrics.binary_accuracy(graph, predictions, labels)
+local categorical_acc = tfa.metrics.categorical_accuracy(graph, predictions,
+  one_hot_labels)
+local sparse_acc = tfa.metrics.sparse_categorical_accuracy(graph, predictions,
+  labels)
+local top_k_acc = tfa.metrics.top_k_categorical_accuracy(graph, predictions,
+  one_hot_labels, { k = 3 })
 local metric = tfa.metrics.f1_score(graph, predictions, labels)
 local precision = tfa.metrics.precision(graph, predicted_classes, labels,
   { average = "macro", num_classes = 3 })
@@ -302,6 +309,11 @@ parity roadmap.
 
 ### Metrics
 
+- `binary_accuracy`
+- `categorical_accuracy`
+- `sparse_categorical_accuracy`
+- `top_k_categorical_accuracy`
+- `sparse_top_k_categorical_accuracy`
 - `f1_score` (binary threshold or multiclass averages)
 - `precision` (binary threshold or multiclass averages)
 - `recall` (binary threshold or multiclass averages)
@@ -322,6 +334,12 @@ parity roadmap.
 - `geometric_mean`
 - `harmonic_mean`
 - `multiclass_f1` (legacy macro-F1 helper)
+
+`binary_accuracy`, `categorical_accuracy`, `sparse_categorical_accuracy`,
+`top_k_categorical_accuracy`, and `sparse_top_k_categorical_accuracy` follow
+Keras accuracy semantics. They accept `options.reduction` (`"mean"`, `"sum"`,
+or `"none"`); the top-k variants accept `options.k` (default `5`). Their
+capitalized aliases are provided.
 
 `f1_score(graph, predictions, labels, options)` keeps the binary threshold API
 by default: scalar predictions are compared with `options.threshold` (default
@@ -865,7 +883,7 @@ It never imports Python or an external tqdm package.
 | --- | --- | --- |
 | Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink`, `snake` | additional activation wrappers |
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss`, `lifted`, `weighted_kappa`, `sparsemax` | hard triplet and further specialized losses |
-| Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
+| Metrics | `binary_accuracy`, `categorical_accuracy`, `sparse_categorical_accuracy`, `top_k_categorical_accuracy`, `sparse_top_k_categorical_accuracy`, `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize`, `rms_normalization`, `unit_normalization`, `standardize`, `local_response_normalization` | further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `gelu`, `spatial_pyramid_pooling_2d`, `esn`, `multi_head_attention`, `noisy_dense`, `stochastic_depth` | further layers |
 | Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW` (with momentum), `RectifiedAdam`, `Adamax`, `RMSprop`, `ConditionalGradient` (Frobenius/nuclear), `MovingAverage`, `Lookahead`, `WeightDecay` | further optimizer wrappers |

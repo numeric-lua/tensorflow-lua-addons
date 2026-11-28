@@ -1209,4 +1209,103 @@ end
 
 Metrics.HammingLoss = Metrics.hamming_loss
 
+local function accuracy_reduce(graph, correct, options, name, dtype)
+  local values = tf.cast(graph, correct, "bool", dtype, name .. "/values")
+  if options.reduction == "sum" then
+    return Ops.sum_all(graph, values, name, dtype)
+  elseif options.reduction == "none" then
+    return Ops.flatten(graph, values, name, dtype)
+  end
+  return tf.reduce_mean(graph, values, { 0 }, name, dtype)
+end
+
+function Metrics.binary_accuracy(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "binary_accuracy"
+  local dtype = options.dtype or "float32"
+  local predicted, labels_float = binary_predictions(graph, predictions, labels,
+    options, name)
+  local correct = Ops.equal(graph, predicted, labels_float,
+    name .. "/correct", dtype)
+  return accuracy_reduce(graph, correct, options, name, dtype)
+end
+
+Metrics.BinaryAccuracy = Metrics.binary_accuracy
+
+function Metrics.categorical_accuracy(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "categorical_accuracy"
+  local dtype = options.dtype or "float32"
+  local prediction_class = tf.argmax(graph, predictions, 1,
+    name .. "/prediction_class", dtype, "int64")
+  local label_class = tf.argmax(graph, labels, 1, name .. "/label_class",
+    dtype, "int64")
+  local correct = Ops.equal(graph, prediction_class, label_class,
+    name .. "/correct", "int64")
+  return accuracy_reduce(graph, correct, options, name, dtype)
+end
+
+Metrics.CategoricalAccuracy = Metrics.categorical_accuracy
+
+function Metrics.sparse_categorical_accuracy(graph, predictions, labels,
+    options)
+  options = options or {}
+  local name = options.name or "sparse_categorical_accuracy"
+  local dtype = options.dtype or "float32"
+  local prediction_class = tf.argmax(graph, predictions, 1,
+    name .. "/prediction_class", dtype, "int64")
+  local labels_int = tf.cast(graph, labels, labels.dtype or "int32", "int64",
+    name .. "/labels")
+  local correct = Ops.equal(graph, prediction_class, labels_int,
+    name .. "/correct", "int64")
+  return accuracy_reduce(graph, correct, options, name, dtype)
+end
+
+Metrics.SparseCategoricalAccuracy = Metrics.sparse_categorical_accuracy
+
+local function top_k_correct(graph, predictions, targets, k, name, dtype)
+  if type(k) ~= "number" or k % 1 ~= 0 or k < 1 then
+    error(name .. " k must be a positive integer", 3)
+  end
+  local top = tf.top_k(graph, predictions, k, name .. "/top_k", dtype)
+  local target_column = tf.reshape(graph, targets, { -1, 1 },
+    name .. "/target_column", "int32")
+  local matches = Ops.equal(graph, top[2], target_column, name .. "/matches",
+    "int32")
+  local desc = graph:new_operation("Any", name .. "/correct")
+  desc:add_input(matches)
+  desc:add_input(tf.constant(graph, { 1 }, name .. "/axis", "int32"))
+  desc:set_bool("keep_dims", false)
+  desc:set_type("Tidx", "int32")
+  return desc:finish()
+end
+
+function Metrics.top_k_categorical_accuracy(graph, predictions, labels, options)
+  options = options or {}
+  local name = options.name or "top_k_categorical_accuracy"
+  local dtype = options.dtype or "float32"
+  local label_class = tf.argmax(graph, labels, 1, name .. "/label_class",
+    dtype, "int32")
+  local correct = top_k_correct(graph, predictions, label_class,
+    options.k or 5, name, dtype)
+  return accuracy_reduce(graph, correct, options, name, dtype)
+end
+
+Metrics.TopKCategoricalAccuracy = Metrics.top_k_categorical_accuracy
+
+function Metrics.sparse_top_k_categorical_accuracy(graph, predictions, labels,
+    options)
+  options = options or {}
+  local name = options.name or "sparse_top_k_categorical_accuracy"
+  local dtype = options.dtype or "float32"
+  local labels_int = tf.cast(graph, labels, labels.dtype or "int32", "int32",
+    name .. "/labels")
+  local correct = top_k_correct(graph, predictions, labels_int,
+    options.k or 5, name, dtype)
+  return accuracy_reduce(graph, correct, options, name, dtype)
+end
+
+Metrics.SparseTopKCategoricalAccuracy =
+  Metrics.sparse_top_k_categorical_accuracy
+
 return Metrics

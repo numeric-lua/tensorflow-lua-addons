@@ -3313,6 +3313,88 @@ test("RMSprop wrapper updates finite variables", function()
   session:close()
 end)
 
+test("binary_accuracy applies the decision threshold", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 3 },
+    "binary_acc_predictions")
+  local labels = tf.placeholder(graph, "float32", { 3 }, "binary_acc_labels")
+  local output = tfa.metrics.binary_accuracy(graph, predictions, labels,
+    { name = "binary_acc" })
+  local value = run(graph, {
+    [predictions] = { 0.9, 0.2, 0.4 },
+    [labels] = { 1, 0, 1 },
+  }, output)
+  near(value, 2 / 3, 1e-6, "binary accuracy")
+  assert_true(tfa.metrics.BinaryAccuracy == tfa.metrics.binary_accuracy)
+end)
+
+test("categorical_accuracy compares argmax classes", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 2, 2 },
+    "categorical_acc_predictions")
+  local labels = tf.placeholder(graph, "float32", { 2, 2 },
+    "categorical_acc_labels")
+  local output = tfa.metrics.categorical_accuracy(graph, predictions, labels,
+    { name = "categorical_acc" })
+  local value = run(graph, {
+    [predictions] = { { 0.8, 0.2 }, { 0.3, 0.7 } },
+    [labels] = { { 1, 0 }, { 0, 1 } },
+  }, output)
+  near(value, 1, 1e-6, "categorical accuracy")
+  assert_true(tfa.metrics.CategoricalAccuracy ==
+    tfa.metrics.categorical_accuracy)
+end)
+
+test("sparse_categorical_accuracy uses integer labels", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 2, 3 },
+    "sparse_acc_predictions")
+  local labels = tf.placeholder(graph, "int32", { 2 }, "sparse_acc_labels")
+  local output = tfa.metrics.sparse_categorical_accuracy(graph, predictions,
+    labels, { name = "sparse_acc" })
+  local value = run(graph, {
+    [predictions] = { { 0.8, 0.1, 0.1 }, { 0.2, 0.2, 0.6 } },
+    [labels] = { 0, 2 },
+  }, output)
+  near(value, 1, 1e-6, "sparse categorical accuracy")
+  assert_true(tfa.metrics.SparseCategoricalAccuracy ==
+    tfa.metrics.sparse_categorical_accuracy)
+end)
+
+test("top_k_categorical_accuracy checks the top-k set", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 2, 3 },
+    "top_k_acc_predictions")
+  local labels = tf.placeholder(graph, "float32", { 2, 3 },
+    "top_k_acc_labels")
+  local output = tfa.metrics.top_k_categorical_accuracy(graph, predictions,
+    labels, { name = "top_k_acc", k = 2 })
+  local value = run(graph, {
+    [predictions] = { { 0.5, 0.3, 0.2 }, { 0.6, 0.2, 0.1 } },
+    [labels] = { { 1, 0, 0 }, { 0, 0, 1 } },
+  }, output)
+  near(value, 0.5, 1e-6, "top-k categorical accuracy")
+  assert_true(tfa.metrics.TopKCategoricalAccuracy ==
+    tfa.metrics.top_k_categorical_accuracy)
+end)
+
+test("sparse_top_k_categorical_accuracy checks integer labels", function()
+  local graph = tf.Graph.new()
+  local predictions = tf.placeholder(graph, "float32", { 2, 3 },
+    "sparse_top_k_acc_predictions")
+  local labels = tf.placeholder(graph, "int32", { 2 },
+    "sparse_top_k_acc_labels")
+  local output = tfa.metrics.sparse_top_k_categorical_accuracy(graph,
+    predictions, labels, { name = "sparse_top_k_acc", k = 2 })
+  local value = run(graph, {
+    [predictions] = { { 0.5, 0.3, 0.2 }, { 0.6, 0.2, 0.1 } },
+    [labels] = { 0, 2 },
+  }, output)
+  near(value, 0.5, 1e-6, "sparse top-k categorical accuracy")
+  assert_true(tfa.metrics.SparseTopKCategoricalAccuracy ==
+    tfa.metrics.sparse_top_k_categorical_accuracy)
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3631,6 +3713,10 @@ test("new parity options reject invalid values", function()
     { { ref = input } }, { beta1 = 1 })
   assert_true(not invalid_radam,
     "RectifiedAdam should reject beta1 outside [0, 1)")
+  local invalid_top_k = pcall(tfa.metrics.top_k_categorical_accuracy, graph,
+    input, input, { k = 0 })
+  assert_true(not invalid_top_k,
+    "top_k_categorical_accuracy should reject non-positive k")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",
