@@ -155,4 +155,49 @@ function Activations.selu(graph, input, name, dtype)
     dtype), name .. "/output", dtype)
 end
 
+function Activations.relu6(graph, input, name, dtype)
+  name = name or "relu6"
+  dtype = dtype or "float32"
+  return tf.clip_by_value(graph, input, 0, 6, name .. "/output", dtype)
+end
+
+-- Leaky ReLU: x for positive inputs, alpha*x otherwise.
+function Activations.leaky_relu(graph, input, alpha, name, dtype)
+  if type(alpha) == "string" then
+    dtype = name
+    name = alpha
+    alpha = nil
+  end
+  name = name or "leaky_relu"
+  dtype = dtype or "float32"
+  alpha = alpha or 0.2
+  if type(alpha) ~= "number" or alpha ~= alpha or alpha == math.huge or
+      alpha == -math.huge then
+    error("leaky_relu alpha must be a finite number", 3)
+  end
+  local positive = tf.greater(graph, input, tf.constant(graph, 0,
+    name .. "/zero", dtype), name .. "/positive", dtype)
+  local negative = tf.mul(graph, input, tf.constant(graph, alpha,
+    name .. "/alpha", dtype), name .. "/negative", dtype)
+  return tf.where(graph, positive, input, negative, name .. "/output", dtype)
+end
+
+function Activations.exponential(graph, input, name, dtype)
+  name = name or "exponential"
+  dtype = dtype or "float32"
+  return tf.exp(graph, input, name .. "/output", dtype)
+end
+
+function Activations.softmax(graph, input, name, dtype)
+  name = name or "softmax"
+  dtype = dtype or "float32"
+  return tf.nn.softmax(graph, input, name .. "/output", dtype)
+end
+
+function Activations.log_softmax(graph, input, name, dtype)
+  name = name or "log_softmax"
+  dtype = dtype or "float32"
+  return tf.nn.log_softmax(graph, input, name .. "/output", dtype)
+end
+
 return Activations

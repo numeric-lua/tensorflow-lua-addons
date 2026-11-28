@@ -44,7 +44,8 @@
 - SGDW momentum/Nesterov and nuclear-norm ConditionalGradient support;
 - binary, categorical, sparse, and top-k accuracy metrics;
 - hard sigmoid, softsign, softplus, ELU, and SELU activations;
-- 160 graph-mode tests.
+- relu6, leaky ReLU, exponential, softmax, and log-softmax activations;
+- 165 graph-mode tests.
 
 ## 0.17.0
 

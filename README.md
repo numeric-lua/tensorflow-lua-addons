@@ -28,6 +28,9 @@ local activation = tfa.activations.gelu(graph, input, "gelu")
 local hard_sigmoid = tfa.activations.hard_sigmoid(graph, input)
 local elu = tfa.activations.elu(graph, input, 1.0)
 local selu = tfa.activations.selu(graph, input)
+local relu6 = tfa.activations.relu6(graph, input)
+local leaky = tfa.activations.leaky_relu(graph, input, 0.2)
+local probabilities = tfa.activations.softmax(graph, input)
 local periodic = tfa.activations.snake(graph, input, 1)
 local loss = tfa.losses.focal(graph, labels, predictions, { gamma = 2 })
 local robust_loss = tfa.losses.log_cosh(graph, labels, predictions)
@@ -214,6 +217,11 @@ local progress = tfa.callbacks.TQDMProgressBar()
 - `softplus`
 - `elu`
 - `selu`
+- `relu6`
+- `leaky_relu`
+- `exponential`
+- `softmax`
+- `log_softmax`
 
 `snake(graph, input, frequency, name, dtype)` implements the periodic Snake
 activation `x + (1 - cos(2 * frequency * x)) / (2 * frequency)`. Frequency may
@@ -222,6 +230,10 @@ be a Lua number or a scalar graph tensor.
 `hard_sigmoid`, `softsign`, `softplus`, `elu`, and `selu` expose the standard
 Keras/TensorFlow activation formulas. `elu` accepts an optional `alpha` before
 `name`; `selu` uses the standard scale and alpha constants.
+
+`relu6`, `leaky_relu`, `exponential`, `softmax`, and `log_softmax` provide the
+remaining common Keras activation wrappers. `leaky_relu` accepts an optional
+`alpha` (default `0.2`) before `name`.
 
 ### Losses
 
@@ -893,7 +905,7 @@ It never imports Python or an external tqdm package.
 
 | Area | Implemented | Remaining TensorFlow Addons work |
 | --- | --- | --- |
-| Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink`, `snake`, `hard_sigmoid`, `softsign`, `softplus`, `elu`, `selu` | additional activation wrappers |
+| Activations | `gelu`, `swish`, `mish`, `lisht`, `tanhshrink`, `snake`, `hard_sigmoid`, `softsign`, `softplus`, `elu`, `selu`, `relu6`, `leaky_relu`, `exponential`, `softmax`, `log_softmax` | additional activation wrappers |
 | Losses | `focal`, `dice`, `tversky`, `triplet`, `contrastive`, `giou`, `log_cosh`, `hinge`, `kl_divergence`, `pinball`, `sigmoid_focal_crossentropy`, `npairs_loss`, `npairs_multilabel_loss`, `triplet_semihard_loss`, `lifted`, `weighted_kappa`, `sparsemax` | hard triplet and further specialized losses |
 | Metrics | `binary_accuracy`, `categorical_accuracy`, `sparse_categorical_accuracy`, `top_k_categorical_accuracy`, `sparse_top_k_categorical_accuracy`, `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize`, `rms_normalization`, `unit_normalization`, `standardize`, `local_response_normalization` | further normalization variants |
