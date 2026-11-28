@@ -3214,6 +3214,105 @@ test("equalize applies a histogram lookup table", function()
   assert_true(tfa.image.Equalize == tfa.image.equalize)
 end)
 
+test("RectifiedAdam starts with the unrectified Adam update", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1 } }, "radam_weight",
+    { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 0.1 } }, "radam_gradient",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "radam_weighted", "float32"), { 0, 1 }, "radam_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.RectifiedAdam(graph, loss,
+    { weight }, { learning_rate = 0.1, name = "radam" })
+  assert_eq(#gradients, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  near(session:run({}, { weight.read })[1]:totable()[1][1], 0.99, 1e-6,
+    "RectifiedAdam first step")
+  session:close()
+end)
+
+test("SGDW supports momentum and Nesterov-compatible velocity", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1 } }, "sgdw_momentum_weight",
+    { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 0.1 } }, "sgdw_momentum_gradient",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "sgdw_momentum_weighted", "float32"), { 0, 1 }, "sgdw_momentum_loss",
+    "float32")
+  local targets, gradients, state = tfa.optimizers.SGDW(graph, loss,
+    { weight }, { learning_rate = 0.1, momentum = 0.9, weight_decay = 0,
+      name = "sgdw_momentum" })
+  assert_eq(#gradients, 1)
+  assert_eq(#state.variables, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  near(session:run({}, { weight.read })[1]:totable()[1][1], 0.99, 1e-6,
+    "SGDW momentum step")
+  session:close()
+end)
+
+test("ConditionalGradient supports the nuclear norm", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1, 1 }, { 1, 1 } },
+    "nuclear_weight", { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 1, 0 }, { 0, 0 } },
+    "nuclear_gradient", "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "nuclear_weighted", "float32"), { 0, 1 }, "nuclear_loss", "float32")
+  local targets = tfa.optimizers.ConditionalGradient(graph, loss, { weight },
+    { learning_rate = 0.5, lambda_ = 0.1, ord = "nuclear", name = "nuclear" })
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer })
+  session:run({}, {}, targets)
+  local values = session:run({}, { weight.read })[1]:totable()
+  near(values[1][1], 0.45, 1e-6, "nuclear top-left")
+  near(values[1][2], 0.5, 1e-6, "nuclear top-right")
+  near(values[2][1], 0.5, 1e-6, "nuclear bottom-left")
+  session:close()
+end)
+
+test("Adamax wrapper updates finite variables", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1 } }, "adamax_weight",
+    { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 0.1 } }, "adamax_gradient",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "adamax_weighted", "float32"), { 0, 1 }, "adamax_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.Adamax(graph, loss,
+    { weight }, { learning_rate = 0.1, name = "adamax" })
+  assert_eq(#gradients, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  near(session:run({}, { weight.read })[1]:totable()[1][1], 0.9, 1e-6,
+    "Adamax step")
+  session:close()
+end)
+
+test("RMSprop wrapper updates finite variables", function()
+  local graph = tf.Graph.new()
+  local weight = tf.variable(graph, { { 1 } }, "rmsprop_weight",
+    { dtype = "float32" })
+  local gradient = tf.constant(graph, { { 0.1 } }, "rmsprop_gradient",
+    "float32")
+  local loss = tf.reduce_sum(graph, tf.mul(graph, weight.read, gradient,
+    "rmsprop_weighted", "float32"), { 0, 1 }, "rmsprop_loss", "float32")
+  local targets, gradients, state = tfa.optimizers.RMSprop(graph, loss,
+    { weight }, { learning_rate = 0.1, name = "rmsprop" })
+  assert_eq(#gradients, 1)
+  local session = tf.Session.new(graph)
+  session:run({}, {}, { weight.initializer, unpack(state.initializers) })
+  session:run({}, {}, targets)
+  near(session:run({}, { weight.read })[1]:totable()[1][1], 0.6837722, 1e-6,
+    "RMSprop step")
+  session:close()
+end)
+
 test("new parity options reject invalid values", function()
   local graph = tf.Graph.new()
   local labels = tf.placeholder(graph, "float32", { 1 }, "newparity_labels")
@@ -3408,9 +3507,9 @@ test("new parity options reject invalid values", function()
   assert_true(not invalid_blend,
     "blend should reject negative factors")
   local invalid_sgdw = pcall(tfa.optimizers.SGDW, graph, nil,
-    { { ref = input } }, { momentum = 0.9 })
+    { { ref = input } }, { momentum = 1 })
   assert_true(not invalid_sgdw,
-    "SGDW should reject unsupported momentum")
+    "SGDW should reject momentum outside [0, 1)")
   local invalid_class_id = pcall(tfa.metrics.precision, graph, input, input,
     { class_id = -1 })
   assert_true(not invalid_class_id,
@@ -3528,6 +3627,10 @@ test("new parity options reject invalid values", function()
     { bins = 1, input_shape = { 1, 3, 3, 1 } })
   assert_true(not invalid_equalize,
     "equalize should reject fewer than two bins")
+  local invalid_radam = pcall(tfa.optimizers.RectifiedAdam, graph, nil,
+    { { ref = input } }, { beta1 = 1 })
+  assert_true(not invalid_radam,
+    "RectifiedAdam should reject beta1 outside [0, 1)")
 end)
 
 io.write(string.format("\n%d addons tests, %d passed, %d failed\n",

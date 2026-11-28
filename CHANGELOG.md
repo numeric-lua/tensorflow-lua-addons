@@ -40,7 +40,9 @@
 - RMS, unit, standardization, and local-response normalization layers;
 - YUV and YIQ color-space conversion helpers;
 - histogram-equalization image helper;
-- 145 graph-mode tests.
+- RectifiedAdam, Adamax, and RMSprop optimizers;
+- SGDW momentum/Nesterov and nuclear-norm ConditionalGradient support;
+- 150 graph-mode tests.
 
 ## 0.17.0
 

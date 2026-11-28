@@ -627,9 +627,40 @@ local function finite_nonnegative(value, label)
   return value
 end
 
--- Conditional gradient (Frank-Wolfe) optimizer with the Frobenius-norm
--- constraint used by tfa.optimizers.ConditionalGradient.  Each variable is
--- updated as lr * variable - (1 - lr) * lambda * gradient / (||gradient|| + eps).
+local function nuclear_direction(graph, gradient, shape, name, dtype)
+  if type(shape) ~= "table" or #shape > 2 then
+    error("ConditionalGradient nuclear norm requires rank <= 2 variables", 3)
+  end
+  local rows = #shape == 2 and shape[1] or 1
+  local columns = #shape == 2 and shape[2] or (#shape == 1 and shape[1] or 1)
+  local matrix = gradient
+  if #shape ~= 2 then
+    matrix = tf.reshape(graph, gradient, { rows, columns }, name .. "/matrix",
+      dtype)
+  end
+  local desc = graph:new_operation("Svd", name .. "/svd")
+  desc:add_input(matrix)
+  desc:set_type("T", dtype)
+  desc:set_bool("compute_uv", true)
+  desc:set_bool("full_matrices", false)
+  local result = desc:finish()
+  local u = { oper = result.oper, index = 1, name = name .. "/svd:1",
+    dtype = dtype }
+  local v = { oper = result.oper, index = 2, name = name .. "/svd:2",
+    dtype = dtype }
+  local u_column = tf.slice(graph, u, { 0, 0 }, { rows, 1 },
+    name .. "/u_column", dtype)
+  local v_row = tf.slice(graph, v, { 0, 0 }, { 1, columns },
+    name .. "/v_row", dtype)
+  local top = tf.matmul(graph, u_column, v_row, name .. "/top", dtype)
+  if #shape < 2 then
+    top = tf.reshape(graph, top, shape, name .. "/direction", dtype)
+  end
+  return top
+end
+
+-- Conditional gradient (Frank-Wolfe) optimizer with Frobenius or nuclear norm
+-- constraints, following tfa.optimizers.ConditionalGradient.
 function Optimizers.ConditionalGradient(graph, loss, variables, options)
   options = options or {}
   if type(variables) ~= "table" or #variables == 0 then
@@ -639,8 +670,8 @@ function Optimizers.ConditionalGradient(graph, loss, variables, options)
   local lambda = options.lambda_ or options.lambda or 0.01
   local epsilon = options.epsilon or 1e-7
   local ord = options.ord or "fro"
-  if ord ~= "fro" then
-    error("ConditionalGradient currently supports ord = 'fro'", 3)
+  if ord ~= "fro" and ord ~= "nuclear" then
+    error("ConditionalGradient ord must be 'fro' or 'nuclear'", 3)
   end
   finite_nonnegative(learning_rate, "ConditionalGradient learning_rate")
   finite_nonnegative(lambda, "ConditionalGradient lambda")
@@ -669,15 +700,25 @@ function Optimizers.ConditionalGradient(graph, loss, variables, options)
     if gradient == nil then
       error("ConditionalGradient received no gradient for variable " .. index, 3)
     end
-    local squared = tf.square(graph, gradient, name .. "/squared_" .. index,
-      var_dtype)
-    local norm = tf.sqrt(graph, Ops.sum_all(graph, squared,
-      name .. "/norm_squared_" .. index, var_dtype), name .. "/norm_" .. index,
-      var_dtype)
-    local denominator = tf.add(graph, norm, epsilon_op,
-      name .. "/denominator_" .. index, var_dtype)
-    local direction = tf.div(graph, gradient, denominator,
-      name .. "/direction_" .. index, var_dtype)
+    local direction
+    if ord == "nuclear" then
+      if variable.shape == nil then
+        error("ConditionalGradient nuclear norm requires static variable shapes",
+          3)
+      end
+      direction = nuclear_direction(graph, gradient, variable.shape,
+        name .. "/nuclear_" .. index, var_dtype)
+    else
+      local squared = tf.square(graph, gradient, name .. "/squared_" .. index,
+        var_dtype)
+      local norm = tf.sqrt(graph, Ops.sum_all(graph, squared,
+        name .. "/norm_squared_" .. index, var_dtype), name .. "/norm_" .. index,
+        var_dtype)
+      local denominator = tf.add(graph, norm, epsilon_op,
+        name .. "/denominator_" .. index, var_dtype)
+      direction = tf.div(graph, gradient, denominator,
+        name .. "/direction_" .. index, var_dtype)
+    end
     local decayed = tf.mul(graph, variable.read, lr,
       name .. "/decayed_" .. index, var_dtype)
     local step = tf.mul(graph, tf.mul(graph, one_minus_lr, lambda_op,
@@ -906,15 +947,69 @@ end
 -- behavior.  Momentum and Nesterov options are not supported by this wrapper.
 function Optimizers.SGDW(graph, loss, variables, options)
   local merged = merge_tables(options or {})
-  if merged.momentum ~= nil and merged.momentum ~= 0 then
-    error("SGDW momentum is not supported by this implementation", 3)
-  end
   merged.weight_decay = merged.weight_decay or merged.wd or 0.004
   merged.name = merged.name or "SGDW"
+  local momentum = merged.momentum or 0
+  if type(momentum) ~= "number" or momentum < 0 or momentum >= 1 then
+    error("SGDW momentum must be in [0, 1)", 3)
+  end
+  local nesterov = merged.nesterov == true
   local learning_rate = merged.learning_rate or merged.lr or 0.01
-  local targets, gradients, lr = Train.gradient_descent(graph, loss, variables,
-    learning_rate, merged.name, merged)
-  return targets, gradients, { learning_rate = lr }
+  if momentum == 0 then
+    local targets, gradients, lr = Train.gradient_descent(graph, loss,
+      variables, learning_rate, merged.name, merged)
+    return targets, gradients, { learning_rate = lr }
+  end
+  if type(variables) ~= "table" or #variables == 0 then
+    error("SGDW expects a non-empty variable list", 3)
+  end
+  local refs = {}
+  for index, variable in ipairs(variables) do
+    refs[index] = variable.ref or variable
+  end
+  local gradients = merged.gradients or tf.gradients(graph, { loss }, refs)
+  local dtype = variables[1].dtype or "float32"
+  local lr = tf.constant(graph, learning_rate, merged.name .. "/learning_rate",
+    dtype)
+  local momentum_op = tf.constant(graph, momentum, merged.name .. "/momentum",
+    dtype)
+  local decay_factor = tf.constant(graph, 1 - learning_rate *
+    merged.weight_decay, merged.name .. "/decay_factor", dtype)
+  local initializers, state_variables, targets = {}, {}, {}
+  for index, variable in ipairs(variables) do
+    local ref = variable.ref or variable
+    local var_dtype = variable.dtype or dtype
+    local shape = variable.shape or { }
+    local velocity = Train.variable(graph, zeros(shape),
+      merged.name .. "/velocity_" .. index, { dtype = var_dtype })
+    initializers[#initializers + 1] = velocity.initializer
+    state_variables[#state_variables + 1] = velocity
+    local gradient = gradients[index]
+    if gradient == nil then
+      error("SGDW received no gradient for variable " .. index, 3)
+    end
+    local next_velocity = tf.add(graph, tf.mul(graph, velocity.read,
+      momentum_op, merged.name .. "/velocity_decay_" .. index, var_dtype),
+      gradient, merged.name .. "/velocity_next_" .. index, var_dtype)
+    local direction = next_velocity
+    if nesterov then
+      direction = tf.add(graph, gradient, tf.mul(graph, momentum_op,
+        next_velocity, merged.name .. "/nesterov_scale_" .. index, var_dtype),
+        merged.name .. "/nesterov_" .. index, var_dtype)
+    end
+    local decayed = tf.mul(graph, variable.read, decay_factor,
+      merged.name .. "/decayed_" .. index, var_dtype)
+    local next_weight = tf.sub(graph, decayed, tf.mul(graph, lr, direction,
+      merged.name .. "/scaled_direction_" .. index, var_dtype),
+      merged.name .. "/next_weight_" .. index, var_dtype)
+    local velocity_assign = assign(graph, velocity.ref, next_velocity,
+      merged.name .. "/velocity_assign_" .. index, var_dtype)
+    targets[#targets + 1] = assign(graph, ref, next_weight,
+      merged.name .. "/weight_assign_" .. index, var_dtype, { velocity_assign })
+  end
+  return targets, gradients, { initializers = initializers,
+    variables = state_variables, learning_rate = lr, momentum = momentum,
+    nesterov = nesterov }
 end
 
 local function validate_average_decay(value)
@@ -1113,6 +1208,151 @@ function Optimizers.MovingAverage(base_optimizer, options)
       base_state = base_state,
     }
   end
+end
+
+-- Rectified Adam optimizer with optional decoupled weight decay and the
+-- variance-rectification threshold from tfa.optimizers.RectifiedAdam.
+function Optimizers.RectifiedAdam(graph, loss, variables, options)
+  options = options or {}
+  if type(variables) ~= "table" or #variables == 0 then
+    error("RectifiedAdam expects a non-empty variable list", 3)
+  end
+  local learning_rate = options.learning_rate or options.lr or 0.001
+  local beta1 = options.beta1 or 0.9
+  local beta2 = options.beta2 or 0.999
+  local epsilon = options.epsilon or 1e-7
+  local weight_decay = options.weight_decay or options.wd or 0
+  local threshold = options.sma_threshold or 5
+  local name = options.name or "RectifiedAdam"
+  finite_nonnegative(learning_rate, "RectifiedAdam learning_rate")
+  finite_nonnegative(weight_decay, "RectifiedAdam weight_decay")
+  finite_nonnegative(threshold, "RectifiedAdam sma_threshold")
+  if type(beta1) ~= "number" or beta1 < 0 or beta1 >= 1 or
+      type(beta2) ~= "number" or beta2 < 0 or beta2 >= 1 then
+    error("RectifiedAdam betas must be in [0, 1)", 3)
+  end
+  local refs = {}
+  for index, variable in ipairs(variables) do
+    refs[index] = variable.ref or variable
+  end
+  local gradients = options.gradients or tf.gradients(graph, { loss }, refs)
+  local dtype = variables[1].dtype or "float32"
+  local lr = tf.constant(graph, learning_rate, name .. "/learning_rate", dtype)
+  local b1 = tf.constant(graph, beta1, name .. "/beta1", dtype)
+  local b2 = tf.constant(graph, beta2, name .. "/beta2", dtype)
+  local eps = tf.constant(graph, epsilon, name .. "/epsilon", dtype)
+  local threshold_op = tf.constant(graph, threshold, name .. "/threshold", dtype)
+  local step = Train.variable(graph, 0, name .. "/iterations",
+    { dtype = "int32" })
+  local step_one = tf.constant(graph, 1, name .. "/step_one_int", "int32")
+  local initializers = { step.initializer }
+  local state_variables = { step }
+  local targets = {}
+  local one = tf.constant(graph, 1, name .. "/one", dtype)
+  local four = tf.constant(graph, 4, name .. "/four", dtype)
+  local two = tf.constant(graph, 2, name .. "/two", dtype)
+  local sma_inf = tf.sub(graph, tf.div(graph, two, tf.sub(graph, one, b2,
+    name .. "/sma_one_minus_b2", dtype), name .. "/sma_base", dtype), one,
+    name .. "/sma_inf", dtype)
+  local one_minus_b1 = tf.sub(graph, one, b1, name .. "/one_minus_b1", dtype)
+  local one_minus_b2 = tf.sub(graph, one, b2, name .. "/one_minus_b2", dtype)
+  local weight_decay_op
+  if weight_decay > 0 then
+    weight_decay_op = tf.constant(graph, weight_decay, name .. "/weight_decay",
+      dtype)
+  end
+  for index, variable in ipairs(variables) do
+    local ref = variable.ref or variable
+    local var_dtype = variable.dtype or dtype
+    local shape = variable.shape or { }
+    local gradient = gradients[index]
+    if gradient == nil then
+      error("RectifiedAdam received no gradient for variable " .. index, 3)
+    end
+    local m = Train.variable(graph, constant_array(shape, 0),
+      name .. "/m_" .. index, { dtype = var_dtype })
+    local v = Train.variable(graph, constant_array(shape, 0),
+      name .. "/v_" .. index, { dtype = var_dtype })
+    initializers[#initializers + 1] = m.initializer
+    initializers[#initializers + 1] = v.initializer
+    state_variables[#state_variables + 1] = m
+    state_variables[#state_variables + 1] = v
+    local local_step = tf.cast(graph, tf.add(graph, step.read,
+      tf.constant(graph, 1, name .. "/step_one", "int32"),
+      name .. "/local_step_int", "int32"), "int32", var_dtype,
+      name .. "/local_step")
+    local b1_power = Ops.pow(graph, b1, local_step, name .. "/b1_power",
+      var_dtype)
+    local b2_power = Ops.pow(graph, b2, local_step, name .. "/b2_power",
+      var_dtype)
+    local m_next = tf.add(graph, tf.mul(graph, m.read, b1,
+      name .. "/m_decay_" .. index, var_dtype), tf.mul(graph, gradient,
+      one_minus_b1, name .. "/m_gradient_" .. index, var_dtype),
+      name .. "/m_next_" .. index, var_dtype)
+    local v_next = tf.add(graph, tf.mul(graph, v.read, b2,
+      name .. "/v_decay_" .. index, var_dtype), tf.mul(graph,
+      tf.square(graph, gradient, name .. "/grad_square_" .. index, var_dtype),
+      one_minus_b2, name .. "/v_gradient_" .. index, var_dtype),
+      name .. "/v_next_" .. index, var_dtype)
+    local m_corr = tf.div(graph, m_next, tf.sub(graph, one, b1_power,
+      name .. "/one_minus_b1_power", var_dtype), name .. "/m_corr_" .. index,
+      var_dtype)
+    local v_corr = tf.sqrt(graph, tf.div(graph, v_next, tf.sub(graph, one,
+      b2_power, name .. "/one_minus_b2_power", var_dtype),
+      name .. "/v_corr_square_" .. index, var_dtype),
+      name .. "/v_corr_" .. index, var_dtype)
+    local sma_t = tf.sub(graph, sma_inf, tf.div(graph, tf.mul(graph,
+      tf.mul(graph, two, local_step, name .. "/sma_step_" .. index, var_dtype),
+      b2_power, name .. "/sma_power_" .. index, var_dtype),
+      tf.sub(graph, one, b2_power, name .. "/sma_denominator_" .. index,
+        var_dtype), name .. "/sma_term_" .. index, var_dtype),
+      name .. "/sma_t_" .. index, var_dtype)
+    local r_t = tf.sqrt(graph, tf.mul(graph, tf.mul(graph, tf.div(graph,
+      tf.sub(graph, sma_t, four, name .. "/sma_minus_four", var_dtype),
+      tf.sub(graph, sma_inf, four, name .. "/sma_inf_minus_four", var_dtype),
+      name .. "/r1", var_dtype), tf.div(graph, tf.sub(graph, sma_t, two,
+      name .. "/sma_minus_two", var_dtype), tf.sub(graph, sma_inf, two,
+      name .. "/sma_inf_minus_two", var_dtype), name .. "/r2", var_dtype),
+      name .. "/r12", var_dtype), tf.div(graph, sma_inf, sma_t,
+      name .. "/sma_ratio", var_dtype), name .. "/r3", var_dtype),
+      name .. "/r_t", var_dtype)
+    local denominator = tf.add(graph, v_corr, eps,
+      name .. "/v_epsilon_" .. index, var_dtype)
+    local rectified = tf.div(graph, tf.mul(graph, r_t, m_corr,
+      name .. "/rectified_numerator", var_dtype), denominator,
+      name .. "/rectified_" .. index, var_dtype)
+    local use_rectified = tf.greater_equal(graph, sma_t, threshold_op,
+      name .. "/use_rectified_" .. index, var_dtype)
+    local update = graph_select(graph, use_rectified, rectified, m_corr,
+      name .. "/update_" .. index, var_dtype)
+    if weight_decay > 0 then
+      update = tf.add(graph, update, tf.mul(graph, variable.read,
+        weight_decay_op, name .. "/weight_decay_term_" .. index, var_dtype),
+        name .. "/update_with_decay_" .. index, var_dtype)
+    end
+    local next_weight = tf.sub(graph, variable.read, tf.mul(graph, lr, update,
+      name .. "/scaled_update_" .. index, var_dtype),
+      name .. "/next_weight_" .. index, var_dtype)
+    local v_assign = assign(graph, v.ref, v_next, name .. "/v_assign_" .. index,
+      var_dtype)
+    local m_assign = assign(graph, m.ref, m_next, name .. "/m_assign_" .. index,
+      var_dtype, { v_assign })
+    targets[#targets + 1] = assign(graph, ref, next_weight,
+      name .. "/weight_assign_" .. index, var_dtype, { m_assign })
+  end
+  targets[#targets + 1] = assign(graph, step.ref, tf.add(graph, step.read,
+    step_one, name .. "/next_step", "int32"), name .. "/increment_iterations",
+    "int32", targets)
+  return targets, gradients, { initializers = initializers,
+    variables = state_variables, step = step }
+end
+
+function Optimizers.Adamax(graph, loss, variables, options)
+  return Train.adamax(graph, loss, variables, options)
+end
+
+function Optimizers.RMSprop(graph, loss, variables, options)
+  return Train.rmsprop(graph, loss, variables, options)
 end
 
 -- Decoupled weight-decay wrapper.  The base optimizer is responsible for

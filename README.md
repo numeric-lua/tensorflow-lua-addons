@@ -175,7 +175,13 @@ local yogi = tfa.optimizers.Yogi(graph, loss, { weight },
 local adamw = tfa.optimizers.AdamW(graph, loss, { weight },
   { learning_rate = 0.001, weight_decay = 0.004 })
 local sgdw = tfa.optimizers.SGDW(graph, loss, { weight },
-  { learning_rate = 0.01, weight_decay = 0.004 })
+  { learning_rate = 0.01, weight_decay = 0.004, momentum = 0.9 })
+local radam = tfa.optimizers.RectifiedAdam(graph, loss, { weight },
+  { learning_rate = 0.001 })
+local adamax = tfa.optimizers.Adamax(graph, loss, { weight },
+  { learning_rate = 0.002 })
+local rmsprop = tfa.optimizers.RMSprop(graph, loss, { weight },
+  { learning_rate = 0.001 })
 local moving = tfa.optimizers.MovingAverage(tfa.optimizers.LAMB,
   { average_decay = 0.99 })
 local lazy = tfa.optimizers.LazyAdam(graph, loss, { weight },
@@ -569,7 +575,10 @@ draw. `options.training` may also be a boolean graph tensor.
 - `Yogi`
 - `AdamW`
 - `SGDW`
-- `ConditionalGradient` (Frobenius norm)
+- `RectifiedAdam`
+- `Adamax`
+- `RMSprop`
+- `ConditionalGradient` (Frobenius or nuclear norm)
 - `MovingAverage` (wrapper)
 - `Lookahead` (wrapper)
 - `WeightDecay` (wrapper)
@@ -581,11 +590,12 @@ on every step. It accepts the same learning-rate, beta, epsilon, and
 weight-decay options as `LAMB`.
 
 `ConditionalGradient(graph, loss, variables, options)` applies the
-Frobenius-norm conditional-gradient update
-`learning_rate * variable - (1 - learning_rate) * lambda *
-gradient / (||gradient|| + epsilon)`. It accepts `options.learning_rate`,
-`options.lambda_` (or `options.lambda`), `options.epsilon`, and
-`options.gradients`; `options.ord` currently supports only `"fro"`.
+conditional-gradient update
+`learning_rate * variable - (1 - learning_rate) * lambda * direction`.
+For `ord = "fro"`, `direction = gradient / (||gradient|| + epsilon)`; for
+`ord = "nuclear"`, it uses the top singular vector. It accepts
+`options.learning_rate`, `options.lambda_` (or `options.lambda`),
+`options.epsilon`, and `options.gradients`.
 
 `Yogi(graph, loss, variables, options)` follows `tfa.optimizers.Yogi` with the
 sign-based second-moment accumulator. It accepts `options.learning_rate`,
@@ -596,8 +606,13 @@ and optional `options.l1_regularization_strength` /
 
 `AdamW(graph, loss, variables, options)` exposes the core decoupled AdamW
 update with TensorFlow Addons' default `weight_decay` of `0.004`.
-`SGDW(graph, loss, variables, options)` exposes SGD with the same decoupled
-weight-decay behavior; momentum and Nesterov options are not supported.
+`SGDW(graph, loss, variables, options)` exposes SGD with decoupled weight
+decay and optional `momentum`/`nesterov`.
+
+`RectifiedAdam(graph, loss, variables, options)` implements variance-rectified
+Adam with configurable betas, epsilon, weight decay, and
+`options.sma_threshold`. `Adamax` and `RMSprop` wrap the core optimizers with
+TensorFlow-compatible options.
 
 `MovingAverage(base_optimizer, options)` wraps a core optimizer and maintains a
 shadow moving average of every variable with `options.average_decay` (default
@@ -853,7 +868,7 @@ It never imports Python or an external tqdm package.
 | Metrics | `f1_score`, `precision`, `recall`, `fbeta_score`, `matthews_corrcoef`, `cohen_kappa`, `r_square`, `pearson_correlation`, `mean_iou`, `multilabel_confusion_matrix`, `hamming_loss`, `hamming_distance`, `auc`, `sensitivity_at_specificity`, `specificity_at_sensitivity`, `precision_at_recall`, `recall_at_precision`, `geometric_mean`, `harmonic_mean`, `multiclass_f1` | further classification metrics |
 | Normalization layers | `group`, `instance`, `layer`, `weight`, `spectral`, `filter_response_normalization`, `poincare_normalize`, `rms_normalization`, `unit_normalization`, `standardize`, `local_response_normalization` | further normalization variants |
 | Other layers | `poisson`, `quantization`, `maxout`, `tlu`, `polynomial_crossing`, `sparsemax`, `adaptive_average_pooling_1d`, `adaptive_max_pooling_1d`, `adaptive_average_pooling_2d`, `adaptive_max_pooling_2d`, `adaptive_average_pooling_3d`, `adaptive_max_pooling_3d`, `netvlad`, `max_unpooling_2d`, `snake`, `gelu`, `spatial_pyramid_pooling_2d`, `esn`, `multi_head_attention`, `noisy_dense`, `stochastic_depth` | further layers |
-| Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW`, `ConditionalGradient` (Frobenius norm), `MovingAverage`, `Lookahead`, `WeightDecay` | nuclear-norm conditional gradient, SGDW momentum, and further wrappers |
+| Optimizers | `LAMB`, `NovoGrad`, `LazyAdam`, `Yogi`, `AdamW`, `SGDW` (with momentum), `RectifiedAdam`, `Adamax`, `RMSprop`, `ConditionalGradient` (Frobenius/nuclear), `MovingAverage`, `Lookahead`, `WeightDecay` | further optimizer wrappers |
 | Image | horizontal/vertical flips, brightness, contrast, saturation/hue, random color/crop augmentation, HSV-in-YIQ, gamma, RGB/HSV/YUV/YIQ/grayscale conversion, histogram equalization, nearest/bilinear/bicubic/area resize, `crop_and_resize`, bounding-box pad/crop/resize, `central_crop`, `sharpness`, `blend`, `dense_image_warp`, `gaussian_filter2d`, `median_filter2d`, `mean_filter2d`, `sobel_edges`, `transform`, `compose_transforms`, `angles_to_projective_transforms`, `translations_to_projective_transforms`, `flat_transforms_to_matrices`, `matrices_to_flat_transforms`, `shear_x`, `shear_y`, `translate`, `rotate`, `cutout`, `random_cutout`, `random_hsv_in_yiq` | further warps and color transforms |
 | Callbacks | `TimeStopping`, `TerminateOnNaN`, `BackupAndRestore`, `CSVLogger`, `TQDMProgressBar` | further progress reporting |
 | RNN/text/seq2seq | none yet | attention, text, and sequence-to-sequence addons |
